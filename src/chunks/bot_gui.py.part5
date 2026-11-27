@@ -1,0 +1,269 @@
+                       fill=ACCENT, font=(FONT, 15, "bold"))
+        st = {"rect": None}
+
+        def finish():
+            try:
+                ov.destroy()
+            except Exception:
+                pass
+            if alive and not was_paused and self.eng:
+                self.eng.paused = False
+                self.log("引擎已继续")
+
+        def on_down(e):
+            st["x0"], st["y0"] = e.x, e.y
+            st["rect"] = cv.create_rectangle(e.x, e.y, e.x, e.y, outline=ACCENT, width=2)
+            st["hint"] = cv.create_text(e.x + 8, e.y - 14, text="", fill=ACCENT,
+                                        font=(MONO, 10), anchor="sw")
+
+        def on_move(e):
+            if st["rect"]:
+                cv.coords(st["rect"], st["x0"], st["y0"], e.x, e.y)
+                cv.itemconfig(st["hint"], text="%d × %d" % (abs(e.x - st["x0"]), abs(e.y - st["y0"])))
+
+        def on_up(e):
+            x0, y0 = min(st["x0"], e.x), min(st["y0"], e.y)
+            x1, y1 = max(st["x0"], e.x), max(st["y0"], e.y)
+            finish()
+            if x1 - x0 < 40 or y1 - y0 < 24:
+                self.log("框选区域太小，已放弃")
+                return
+            self.cfg["region"] = [x0, y0, x1 - x0, y1 - y0]
+            self.cfg["follow"] = False
+            if hasattr(self, "follow"):
+                self.follow.set(False)
+            self.lbl_region.config(text=self.region_text())
+            self.log("已设置检测区域 %d,%d %dx%d" % (x0, y0, x1 - x0, y1 - y0))
+            self.after(200, self.test)
+
+        cv.bind("<ButtonPress-1>", on_down)
+        cv.bind("<B1-Motion>", on_move)
+        cv.bind("<ButtonRelease-1>", on_up)
+        esc = lambda e: (finish(), self.log("已取消框选"))
+        cv.bind("<Escape>", esc)
+        ov.bind("<Escape>", esc)
+        ov.focus_force()
+        cv.focus_set()
+
+    def clear_region(self):
+        self.cfg["region"] = None
+        self.cfg["follow"] = True
+        if hasattr(self, "follow"):
+            self.follow.set(True)
+        self.lbl_region.config(text=self.region_text())
+        self.log("已清除框选区域，改为跟随游戏窗口右下角")
+
+    # ---- 识别测试 ----
+    def test(self):
+        c = self.pull_cfg()
+        try:
+            region = resolve_region(self._sct, c)
+            img = grab(self._sct, region)
+        except Exception as e:
+            messagebox.showwarning("提示", str(e))
+            return
+        cards = find_cards_tpl(img, c) or find_cards(img, c) or find_cards(img, c, loose=True)
+        dbg = draw_debug(img, cards, region, "test")
+        if self.imgq.qsize() < 3:
+            try:
+                self.imgq.put_nowait(dbg)
+            except queue.Full:
+                pass
+        try:
+            cv2.imwrite(os.path.join(BASE_DIR, "test_debug.png"), dbg)
+        except Exception:
+            pass
+        self.log("测试：区域%s 尺寸%dx%d 找到 %d 张卡片 %s" % (
+            region, img.shape[1], img.shape[0], len(cards),
+            ", ".join("%s@%s solid%.2f" % ("蓝" if x["blue"] else "白", x["box"], x["score"])
+                      for x in cards)))
+
+    # ---- 控制 ----
+    def start(self):
+        if self.eng and self.eng.is_alive():
+            self.log("引擎还在停止中，请稍候再启动")
+            return
+        c = self.pull_cfg()
+        if not c.get("region") and not c.get("hwnd"):
+            messagebox.showwarning("提示", "先选窗口或框选区域")
+            return
+        try:
+            resolve_region(self._sct, c)
+        except Exception as e:
+            messagebox.showwarning("提示", str(e))
+            return
+        self.eng = Engine(self.cfg, self.logq, self.imgq)
+        self.eng.start()
+        self.after(40, self._activate_game)
+        self._start_panel()
+        self._start_btn(False)
+        self.pill.config(text=" 运行 ", bg=ACCENT, fg="#0A1016")
+
+    def _activate_game(self):
+        """点“开始”时前台是本程序，此刻才允许把游戏窗口切到前台（过后会被前台锁挡住）"""
+        hwnd = self.cfg.get("hwnd")
+        if not hwnd:
+            return
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.2)
+            if win32gui.GetForegroundWindow() == hwnd:
+                self.log("已把游戏窗口切到前台，开始挂机")
+            else:
+                self.log("提示：Windows 前台锁没放行，请手动点一下游戏画面，否则点击会穿透到桌面")
+        except Exception as e:
+            self.log("切换前台失败：%s" % e)
+
+    def _start_panel(self):
+        self._stop_panel()
+        if not self.cfg.get("bag"):
+            return
+        self.panelbot = PanelBot(self.cfg, self.logq, self.eng)
+        self.panelbot.start()
+        self.log("背包巡检已启动：每 %d 秒一轮，存仓点击 %d 次" % (
+            int(self.cfg.get("bag_interval", 600)), int(self.cfg.get("wh_click", 3))))
+
+    def _stop_panel(self):
+        pb = getattr(self, "panelbot", None)
+        if pb and pb.is_alive():
+            pb.stop()
+        self.panelbot = None
+
+    def check_bag(self):
+        c = self.pull_cfg()
+        if not c.get("hwnd"):
+            messagebox.showwarning("提示", "先在①里选好游戏窗口")
+            return
+        self.log("手动巡检一次（请让游戏窗口在前台）…")
+        self._stop_panel()
+        pb = PanelBot(self.cfg, self.logq, self.eng)
+
+        def work():
+            paused = None
+            if self.eng is not None and self.eng.is_alive():
+                paused = self.eng.paused
+                self.eng.paused = True        # 巡检期间暂停点宝箱，避免两边抢鼠标
+            try:
+                pb.cycle()
+            except Exception as e:
+                self.log("巡检失败：%s" % e)
+            finally:
+                try:
+                    pb.esc(4)
+                except Exception:
+                    pass
+                if self.eng is not None and paused is not None:
+                    self.eng.paused = bool(paused)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_btn(self, enabled):
+        if enabled:
+            self.btn_start.config(state="normal", text="开始", bg=ACCENT,
+                                    fg="#0A1016", activebackground=ACCENT_H, cursor="hand2")
+        else:
+            self.btn_start.config(state="disabled", text="运行中", bg="#2C2F35",
+                                    fg="#6E747D", activebackground="#2C2F35", cursor="arrow")
+
+    def toggle(self):
+        if self.eng and self.eng.is_alive():
+            self.eng.paused = not self.eng.paused
+            self.log("暂停" if self.eng.paused else "继续")
+
+    def stop(self):
+        self._stop_panel()
+        if self.eng and self.eng.is_alive():
+            self.eng.stop()
+            self.log("正在停止…")
+        else:
+            self._start_btn(True)
+            self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+
+    def save(self):
+        self.pull_cfg()
+        d = {k: v for k, v in self.cfg.items() if k != "hwnd"}
+        try:
+            with open(CFG_PATH, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=2)
+            self.log("配置已保存：%s" % CFG_PATH)
+            self.lbl_region.config(text=self.region_text())
+        except Exception as e:
+            self.log("保存配置失败：%s" % e)
+
+    def _render_preview(self):
+        img = getattr(self, "_last_bgr", None)
+        if img is None:
+            return
+        try:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            pw = max(200, self.canvas.winfo_width() - 8)
+            ph = max(120, self.canvas.winfo_height() - 8)
+            sc = min(pw / float(w), ph / float(h), 4.0)
+            pil = Image.fromarray(rgb).resize(
+                (max(1, int(w * sc)), max(1, int(h * sc))), Image.NEAREST)
+            self._tk = ImageTk.PhotoImage(pil)
+            self.canvas.config(image=self._tk)
+            self.lbl_prev.config(text="预览 %d×%d · 缩放 %.0f%%" % (w, h, sc * 100))
+        except Exception:
+            pass
+
+    def _poll(self):
+        try:
+            while True:
+                kind, payload = self.logq.get_nowait()
+                if kind == "log":
+                    self.log(payload)
+                elif kind == "stopped":
+                    self._start_btn(True)
+                    self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+        except queue.Empty:
+            pass
+        while True:
+            try:
+                key = self.hotq.get_nowait()
+            except queue.Empty:
+                break
+            if key == "f8":
+                self.toggle()
+            elif key == "f12":
+                self.stop()
+        img = None
+        while True:
+            try:
+                img = self.imgq.get_nowait()
+            except queue.Empty:
+                break
+        if img is not None:
+            self._last_bgr = img
+            self._render_preview()
+        if self.eng:
+            running = self.eng.is_alive()
+            s = ("暂停" if self.eng.paused else "运行") if running else "停止"
+            self.stat_vals["rounds"].config(text=str(self.eng.rounds))
+            self.stat_vals["clicks"].config(text=str(self.eng.clicks))
+            self.stat_vals["hits"].config(text=str(self.eng.hits))
+            self.stat_vals["state"].config(text=s, fg=(
+                (OK if not self.eng.paused else WARN) if running else SUB))
+            if running:
+                self.pill.config(text=" 暂停 " if self.eng.paused else " 运行 ",
+                                 bg=WARN if self.eng.paused else ACCENT,
+                                 fg="#0A1016" if not self.eng.paused else "#231A00")
+            else:
+                self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+        self.after(120, self._poll)
+
+    def _close(self):
+        try:
+            if getattr(self, "_kb", None):
+                self._kb.unhook_all()
+        except Exception:
+            pass
+        self.stop()
+        self.save()
+        self.after(150, self.destroy)
+
+
+if __name__ == "__main__":
+    App().mainloop()
+
