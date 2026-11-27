@@ -68,7 +68,7 @@ def find_banners(img):
 class PanelBot(threading.Thread):
     """每 N 秒一轮：金盾开英雄面板 → 读背包占用 → 满了去仓库点「仓库<背包」
        → 仓库也满且开启合成时，走魔方「自动填充 + 合成」。
-       任何一步没校验通过就放弃并退回，绘不盲点。"""
+       任何一步没校验通过就放弃并退回，绝不盲点。"""
 
     def __init__(self, cfg, logq, eng=None):
         super().__init__(daemon=True)
