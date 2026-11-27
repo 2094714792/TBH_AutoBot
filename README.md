@@ -1,8 +1,8 @@
 # TBH_AutoBot（TaskBarHero 自动挂机助手）
 
-一个面向《TaskBarHero》的 Windows 桌面自动化小工具：自动识别并点击游戏里出现的**宝箱卡片**，定时巡检**背包 / 仓库**，仓库满时可选用**魔方**自动填充并合成。
+面向《TaskBarHero》的 Windows 桌面自动化小工具：自动识别并点击游戏里的**宝箱卡片**，定时巡检**背包 / 仓库**，仓库满时可选用**魔方**自动填充并合成。
 
-界面是 Python + Tkinter 做的深色 Fluent 风格，单文件打包成 exe，双击即用。
+界面是 Python + Tkinter 的深色 Fluent 风格，可打包成单文件 exe。
 
 ## 功能
 
@@ -27,7 +27,7 @@ pillow
 keyboard
 ```
 
-Windows 10/11，Python 3.11。程序启动时会 `SetProcessDpiAwareness(2)`，所以 125% / 150% 缩放下 win32 坐标、截图、点击都用物理像素，三者一致。
+Windows 10/11 + Python 3.11。程序启动时会 `SetProcessDpiAwareness(2)`，所以 125% / 150% 缩放下 win32 坐标、截图、点击都用物理像素，三者一致。
 
 ## 运行
 
@@ -37,13 +37,24 @@ python tools/restore_templates.py   # 还原 card_tpl.png / arrow_icon.png
 python bot_gui.py
 ```
 
-`card_tpl.png`、`arrow_icon.png` 必须和脚本（或打包后的 exe）放在同一目录——它们是识别用的模板图。仓库里以 base64 存放（GitHub 只能推文本），用上面的脚本还原。
+`card_tpl.png`、`arrow_icon.png` 必须和脚本（或打包后的 exe）放在同一目录——它们是识别用的模板图。仓库里以 base64 存放（传输通道只能推文本），用上面的脚本还原。
 
 打包（可选）：
 
 ```bash
 python -m PyInstaller -F -w -n TBH_AutoBot --hidden-import win32timezone --collect-submodules mss bot_gui.py
 ```
+
+## 上传源码（一次性）
+
+`bot_gui.py` 约 58KB，为避免手工复制失真，源码用本机脚本直传（base64 + git blob sha1 自动校验）：
+
+```bash
+set GITHUB_TOKEN=<你的 fine-grained token，Contents: Read and write>
+python tools/push_source.py
+```
+
+脚本会把 `bot_gui.py`、`card_tpl.png`、`arrow_icon.png`、`README.md`、`requirements.txt`、`.gitignore` 逐个上传，并比对 GitHub 返回的 blob sha 与本地是否一致；不一致会直接报出来。
 
 ## 使用要点
 
@@ -55,7 +66,7 @@ python -m PyInstaller -F -w -n TBH_AutoBot --hidden-import win32timezone --colle
 ## 已知限制
 
 - 游戏窗口带 `WS_EX_TRANSPARENT`，抢前台用 `SetForegroundWindow` / `AttachThreadInput` / `SwitchToThisWindow` 基本都被前台锁挡住，只有本程序自己是前台的那一刻（刚点「开始」）成功率最高。
-- 面板会随开启数量左右平移（单面板 banner≈1656，两个 1354+1676，三个 1032/1354/1676），所以代码里全部用「banner 相对偏移」，改动前先重新标定。
+- 面板会随开启数量左右平移（单面板 banner≈1656，两个 1354+1676，三个 1032/1354/1676），所以代码里全部用「banner 相对偏移」，改动前需重新标定。
 - 魔方两个按钮的偏移是按参考图换算的，尚未逐帧实测；背包占用率目前只是「彩色像素占比」的参考值，不做判定。
 
 ## 结构
@@ -65,8 +76,8 @@ bot_gui.py        # 全部逻辑：窗口枚举 / 区域解析 / 卡片识别 / 
 card_tpl.png      # 宝箱卡片模板（62×44）
 arrow_icon.png    # 右下角「金盾」按钮模板（25×29）
 config.json       # 运行参数（首次运行自动生成）
-FIXES.md          # 迭代记录与问题定位过程
-tools/            # 模板图 base64 与还原脚本
+FIXES.md          # 迭代记录：每一轮问题怎么定位、怎么改
+tools/            # 模板还原 / 源码直传
 ```
 
 ## 免责
