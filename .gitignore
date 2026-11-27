@@ -1,0 +1,9 @@
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+test_debug.png
+dev/
+config.json
+*.exe
