@@ -6,4 +6,5 @@ __pycache__/
 test_debug.png
 dev/
 config.json
+.ghtoken
 *.exe

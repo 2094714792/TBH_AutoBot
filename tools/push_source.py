@@ -4,12 +4,12 @@
 为什么要这个脚本：GitHub 连接器只能把文件内容当文本传，58KB 的源码手抄容易失真。
 用这个脚本，文件从本地磁盘直接 base64 上传，再用 git blob sha1 校验远端与本地是否完全一致。
 
-用法（二选一）：
+用法（三选一）：
     python tools/push_source.py <你的 GitHub Token>
-    或先 set GITHUB_TOKEN=xxx，再 python tools/push_source.py
+    set GITHUB_TOKEN=xxx 后 python tools/push_source.py
+    把 token 写进仓库根目录的 .ghtoken（已加入 .gitignore）后 python tools/push_source.py
 
 Token 需要 fine-grained token，权限勾 "Contents: Read and write"，只给这一个仓库。
-跑完可以在 https://github.com/<owner>/<repo> 上看到提交。
 """
 import base64
 import hashlib
@@ -84,13 +84,25 @@ def push_one(path, token, root):
     return True
 
 
+def read_local_token(root):
+    """支持把 token 写在本机 .ghtoken 文件里，避免出现在命令行历史/聊天里"""
+    p = os.path.join(root, ".ghtoken")
+    if os.path.exists(p):
+        try:
+            return open(p, encoding="utf-8").read().strip()
+        except Exception:
+            return ""
+    return ""
+
+
 def main():
+    root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     token = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("GITHUB_TOKEN", "")
+    token = token or read_local_token(root)
     if not token:
         print(__doc__)
-        print("缺少 token。")
+        print("缺少 token：可写进 .ghtoken 文件，或设 GITHUB_TOKEN 环境变量。")
         return 2
-    root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     print("推送到 %s/%s (%s)" % (OWNER, REPO, BRANCH))
     ok = 0
     for path in FILES:
