@@ -223,7 +223,7 @@ class App(tk.Tk):
     # ---- 视觉 ----
     def _style(self):
         st = ttk.Style(self)
-            try:
+        try:
             st.theme_use("clam")
         except Exception:
             pass
