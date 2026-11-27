@@ -1,85 +1,78 @@
-# TBH_AutoBot（TaskBarHero 自动挂机助手）
+# TBH_AutoBot
 
-面向《TaskBarHero》的 Windows 桌面自动化小工具：自动识别并点击游戏里的**宝箱卡片**，定时巡检**背包 / 仓库**，仓库满时可选用**魔方**自动填充并合成。
-
-界面是 Python + Tkinter 的深色 Fluent 风格，可打包成单文件 exe。
+TaskBarHero 宝箱自动挂机助手（Windows 10/11，Python 3.11 + Tkinter）。
+识别游戏窗口右下角的宝箱卡片并自动点击，附带「背包 → 仓库」定时巡检；仓库也满时可选走魔方自动填充 + 合成（默认关闭）。
 
 ## 功能
 
 | 模块 | 说明 |
-|---|---|
-| 宝箱识别 | 模板匹配（`card_tpl.png`，多尺度）→ 白色阈值（严）→ 白色阈值（松）。卡片压在白色网页/聊天窗上也能认出来 |
-| 点击校验 | 点完立刻回截，比较卡片区域差异；同一位置连续多次无变化自动跳过一段时间，避免一直空点 |
-| 检测区域 | 默认**跟随游戏窗口右下角**（游戏窗口会随面板开合改变尺寸和位置，写死坐标必错）；也可手动框选 |
-| 前台守卫 | 游戏窗口是 `WS_EX_TRANSPARENT` 的置顶窗口，不在前台时鼠标点击会**穿透**到桌面/别的软件。所以只在游戏位于前台时才点击，并给出提示 |
-| 背包 / 仓库 | 点右下角「金盾」按钮开英雄面板 → 底部六边形「仓库」→ 点「仓库<背包」存仓（幂等操作，背包空着点也不会出错） |
-| 魔方合成 | 仓库也满时：开「魔方」→「自动填充」→「✚ 合成」，可重复多次。**会消耗 9 件同等级装备，默认关闭** |
+| --- | --- |
+| 卡片识别 | 模板匹配 → 白色阈值（严）→ 白色阈值（松）。白色网页/窗口压在卡片后面时也不会漏识 |
+| 点击校验 | 点完回截比对，同一位置连续多次无变化就跳过一段时间 |
+| 前台守卫 | 只在游戏处于前台时才点击（游戏是透明置顶窗口，非前台时点击会穿透到桌面/其它软件） |
+| 检测区域 | 默认跟随游戏窗口右下角（窗口随面板开合改变尺寸），也可手动框选 |
+| 背包巡检 | 定时开英雄面板 → 仓库 → 点「仓库<背包」存仓（幂等操作，背包空着点也不会出错） |
+| 魔方合成 | 可选，9 件同等级装备换 1 件，不可撤销，默认关闭 |
+| 热键 | F8 暂停/继续，F12 停止；手动巡检时会自动暂停引擎，避免两边抢鼠标 |
 
-## 依赖
+## 环境
 
-```
-opencv-python
-mss
-numpy
-pywin32
-pyautogui
-pillow
-keyboard
-```
-
-Windows 10/11 + Python 3.11。程序启动时会 `SetProcessDpiAwareness(2)`，所以 125% / 150% 缩放下 win32 坐标、截图、点击都用物理像素，三者一致。
+- Windows 10/11（目前只测过 Windows）
+- Python **3.11**（3.13 的 cv2 / pyautogui 轮子还不全，不建议）
+- 依赖：`pip install -r requirements.txt`
 
 ## 运行
 
-```bash
+```bat
 pip install -r requirements.txt
-python tools/restore_templates.py   # 还原 card_tpl.png / arrow_icon.png
+python tools/assemble_bot_gui.py     :: 从 src/chunks 拼出 bot_gui.py（会校验 sha256）
 python bot_gui.py
 ```
 
-`card_tpl.png`、`arrow_icon.png` 必须和脚本（或打包后的 exe）放在同一目录——它们是识别用的模板图。仓库里以 base64 存放（传输通道只能推文本），用上面的脚本还原。
+`bot_gui.py` 是拼装产物，不入库；权威内容就在 `src/chunks/bot_gui.py.part1..part5`，
+拼装后的 sha256 记录在 `tools/assemble_bot_gui.py` 的 `EXPECT_SHA256` 里。
 
-打包（可选）：
+## 模板图（必须与程序同目录）
 
-```bash
-python -m PyInstaller -F -w -n TBH_AutoBot --hidden-import win32timezone --collect-submodules mss bot_gui.py
+| 文件 | 尺寸 | 用途 |
+| --- | --- | --- |
+| `card_tpl.png` | 62×44 | 宝箱卡片模板 |
+| `arrow_icon.png` | 25×29 | 右下角金盾按钮（开英雄面板的入口） |
+
+二进制不便直接放仓库，这里以 base64 存放：
+
+```bat
+python tools/restore_templates.py     :: 由 tools/*.b64 还原出两张 png
 ```
 
-## 上传源码（一次性）
+## 目录结构
 
-`bot_gui.py` 约 58KB，为避免手工复制失真，源码用本机脚本直传（base64 + git blob sha1 自动校验）：
-
-```bash
-set GITHUB_TOKEN=<你的 fine-grained token，Contents: Read and write>
-python tools/push_source.py
 ```
-
-脚本会把 `bot_gui.py`、`card_tpl.png`、`arrow_icon.png`、`README.md`、`requirements.txt`、`.gitignore` 逐个上传，并比对 GitHub 返回的 blob sha 与本地是否一致；不一致会直接报出来。
+bot_gui.py            ← 由 tools/assemble_bot_gui.py 生成（不入库）
+requirements.txt
+FIXES.md              迭代记录：遮挡误判、点击穿透、背包/仓库/魔方
+src/chunks/           bot_gui.py 的 5 段切片，字节级可拼回
+tools/assemble_bot_gui.py   拼装 + sha256 校验
+tools/restore_templates.py  还原模板图
+tools/card_tpl.png.b64
+tools/arrow_icon.png.b64
+tools/push_source.py  维护者用：拿 token 直传源码（本地没装 git 时的傅逯）
+```
 
 ## 使用要点
 
-1. 顶上选好目标窗口（`TaskBarHero`），默认已勾选「跟随窗口右下角」。
-2. 点「开始」。程序会把游戏窗口切到前台；**如果切不过去（Windows 前台锁），手动点一下游戏画面**，否则点击会穿透到桌面，日志里会出现「游戏窗口不在前台」的提示。
-3. 想用背包巡检：在 ④ 里勾「定时巡检背包」，再点一次「立即巡检一次」确认坐标对得上。
-4. 合成开关默认关闭。打开前请确认：合成是 `9 件同等级 → 1 件更高等级`，**不可撤销**。
+1. 先把游戏开到任务栏状态，在①里选中它（选错了可以「刷新」）
+2. 检测区域建议「跟随窗口右下角」；分辨率不同就改 `rel_w / rel_h / rel_right / rel_bottom`
+3. 点「开始」—— 这一瞬间本程序还在前台，程序会顺手把游戏切到前台（Windows 前台锁只在此时放行）
+4. 游戏必须在前台。不在前台时程序会暂停点击，每 8 秒在日志里提示当前前台是谁
+5. 背包巡检默认关闭，勾选后默认每 10 分钟一轮；想现在就试可点「立即巡检一次」
 
 ## 已知限制
 
-- 游戏窗口带 `WS_EX_TRANSPARENT`，抢前台用 `SetForegroundWindow` / `AttachThreadInput` / `SwitchToThisWindow` 基本都被前台锁挡住，只有本程序自己是前台的那一刻（刚点「开始」）成功率最高。
-- 面板会随开启数量左右平移（单面板 banner≈1656，两个 1354+1676，三个 1032/1354/1676），所以代码里全部用「banner 相对偏移」，改动前需重新标定。
-- 魔方两个按钮的偏移是按参考图换算的，尚未逐帧实测；背包占用率目前只是「彩色像素占比」的参考值，不做判定。
-
-## 结构
-
-```
-bot_gui.py        # 全部逻辑：窗口枚举 / 区域解析 / 卡片识别 / 引擎线程 / 面板巡检 / Tkinter 界面
-card_tpl.png      # 宝箱卡片模板（62×44）
-arrow_icon.png    # 右下角「金盾」按钮模板（25×29）
-config.json       # 运行参数（首次运行自动生成）
-FIXES.md          # 迭代记录：每一轮问题怎么定位、怎么改
-tools/            # 模板还原 / 源码直传
-```
+- 面板按钮偏移是按顶部 banner 的相对位置算的，魔方「自动填充 / 合成」两个位置尚未逐帧实测
+- 背包“占用率”只是彩色像素占比的参考值，不做满/空判定（所以存仓做成了幂等操作）
+- 只支持 Windows；分辨率/缩放不同需要调参数
 
 ## 免责
 
-仅供个人学习与自动化练习。自动化点击作用于第三方游戏，可能违反游戏服务条款，请自行评估风险；因使用本工具造成的账号或数据损失由使用者自负。
+仅供个人学习与自动化实验。自动化操作可能违反游戏用户协议，使用后果自负。
