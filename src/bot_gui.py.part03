@@ -1,0 +1,177 @@
+        cv2.putText(dbg, "%s %.2f" % ("BLUE" if c["blue"] else "card", c["score"]),
+                    (x, max(12, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1)
+    cv2.putText(dbg, "region=%s %s" % (region, extra), (4, 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1)
+    return dbg
+
+
+# ---------------- 游戏内面板（背包 / 仓库 / 魔方） ----------------
+# 实测（1920×1080 / 125%）：右下角金盾(25×29) → 英雄面板（背包格/页签/底部五枚六边形功能键）
+#   1 仓库 / 2 属性 / 3 符文 / 4 魔方 / 5 宝石，间距 57px
+# 面板开合会让它整体左右平移，所以按钮一律「现找图标再点」，不用屏幕绝对坐标。
+SHIELD_TPL = "arrow_icon"
+
+
+class PanelBot(threading.Thread):
+    """定时巡检：金盾 → 英雄面板 → 「仓库」六边形存仓；勾了魔方再点「魔方」自动填充+合成。
+
+    坐标由「六边形行」推导（仓库 -2 格、属性 -1、符文 0、魔方 +1、宝石 +2），
+    再用灰度模板在 ±80px 小窗里确认面板真开着——既不会点到符文，也不会瞎点。"""
+
+    HEX_STEP = 57          # 六边形横向间距（实测 56~58）
+    WH_OFF = (-161, 26)    # 「仓库<背包」相对「仓库」六边形点
+    WH_BACK_DX = 130       # 「仓库>背包」在「仓库<背包」左边多少像素
+    WH_GRID = (-150, -330, 250, 315)   # 仓库格子区相对「仓库<背包」按钮
+
+    def __init__(self, cfg, logq, eng=None):
+        super().__init__(daemon=True)
+        self.cfg, self.logq, self.eng = cfg, logq, eng
+        self._stop = threading.Event()
+        self.sct = None        # mss 句柄不跨线程，首次截图时创建
+        self.last_run = 0.0
+        self.bag = -1.0
+        self.sc = 1.0          # 当前 UI 缩放（游戏窗口被拉大/拉小时自动更新）
+
+    def log(self, m):
+        self.logq.put(("log", "【面板】" + m))
+
+    def stop(self):
+        self._stop.set()
+
+    # ---------------- 基础 ----------------
+    def _shot(self):
+        if self.sct is None:
+            self.sct = new_sct()
+        return grab_all(self.sct)
+
+    def _click(self, x, y):
+        """点一下；该点被别的软件挡住时不点，免得把点击打到别人窗口上"""
+        blk, why = point_blocked(int(x), int(y), self.cfg.get("hwnd"))
+        if blk:
+            self.log("(%d,%d) 被 %s 压住，这次不点（把游戏切到最前再来）" % (x, y, why))
+            return False
+        pg.moveTo(int(x), int(y), duration=0.10)
+        time.sleep(0.10)
+        pg.click()
+        time.sleep(0.55)
+        return True
+
+    def _match(self, name, img, box=None, thr=0.80):
+        """灰度模板匹配；box=(x0,y0,x1,y1) 时限在这个小窗口里找"""
+        tpl = load_tpl(name, self.sc)
+        if tpl is None:
+            return None
+        if box is None:
+            x0, y0, x1, y1 = 0, 0, img.shape[1], img.shape[0]
+        else:
+            x0, y0, x1, y1 = box
+        x0, y0 = max(0, int(x0)), max(0, int(y0))
+        x1, y1 = min(img.shape[1], int(x1)), min(img.shape[0], int(y1))
+        if x1 - x0 < tpl.shape[1] or y1 - y0 < tpl.shape[0]:
+            return None
+        res = cv2.matchTemplate(cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY),
+                                cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY), cv2.TM_CCOEFF_NORMED)
+        _mn, mx, _ml, m = cv2.minMaxLoc(res)
+        if mx < thr:
+            return None
+        return (float(mx), x0 + m[0] + tpl.shape[1] // 2, y0 + m[1] + tpl.shape[0] // 2)
+
+    def _box(self, cx, cy, rx=16, ry=16):
+        return (cx - rx, cy - ry, cx + rx + 1, cy + ry + 1)
+
+    def _row(self, img):
+        """认六边形行：符文全屏匹配（实测 score 1.0）当锚，其余四枚现找，认不到按间距推"""
+        sc = self.sc
+        rune = self._match("hex_rune", img, None, 0.93)
+        if rune is None:
+            return {}
+        rx, ry = rune[1], rune[2]
+        found = {}
+        for n, tpl in (("仓库", "hex_store"), ("属性", "hex_attr"),
+                       ("魔方", "hex_cube"), ("宝石", "hex_gem")):
+            p = self._match(tpl, img, None, 0.90)
+            if p and abs(p[2] - ry) <= 6 * sc and abs(p[1] - rx) <= 140 * sc:
+                found[n] = p[1]
+        pts = sorted([(rx, "符文")] + [(x, n) for n, x in found.items()])
+        gaps = [b[0] - a[0] for a, b in zip(pts, pts[1:]) if 0 < b[0] - a[0] < 120 * sc]
+        step = int(round(sorted(gaps)[len(gaps) // 2])) if gaps else self.HEX_STEP * sc
+        out = {"符文": (rx, ry)}
+        for n, k in (("仓库", -2), ("属性", -1), ("魔方", 1), ("宝石", 2)):
+            out[n] = (found.get(n, int(round(rx + k * step))), ry)
+        return out
+
+    def _open_hero(self):
+        """保证英雄面板开着（已开着就不再点金盾，否则会把它点关）"""
+        for _ in range(3):
+            img = self._shot()
+            if self._row(img):
+                return img
+            sh = self._match(SHIELD_TPL, img, None, 0.70)
+            if not sh:
+                self.log("看不到右下角金盾按钮，跳过")
+                return None
+            if not self._click(sh[1], sh[2]):
+                return None
+            time.sleep(0.45)
+        img = self._shot()
+        return img if self._row(img) else None
+
+    def _open_hex(self, hex_name):
+        """点一枚六边形并返回点后的画面"""
+        img = self._open_hero()
+        if img is None:
+            return None
+        row = self._row(img)
+        if hex_name not in row:
+            self.log("找不到「%s」六边形，放弃" % hex_name)
+            return None
+        if not self._click(*row[hex_name]):
+            return None
+        time.sleep(0.75)
+        return self._shot()
+
+    # ---------------- 仓库 ----------------
+    def _wh_anchor(self, img):
+        """返回（存仓按钮坐标, 面板是否已开）；「仓库<背包」「仓库>背包」任一认出来就算开着"""
+        row = self._row(img)
+        if not row:
+            return None, False
+        sc = self.sc
+        sx, sy = row["仓库"]
+        btn = (int(sx + self.WH_OFF[0] * sc), int(sy + self.WH_OFF[1] * sc))
+        hit = self._match("wh_store", img, self._box(btn[0], btn[1], 80 * sc, 36 * sc), 0.60)
+        if hit is None:
+            bx = btn[0] - self.WH_BACK_DX * sc
+            hit = self._match("wh_back", img, self._box(bx, btn[1], 80 * sc, 36 * sc), 0.60)
+        return btn, hit is not None
+
+    def _open_warehouse(self):
+        """点「仓库」六边形把面板打开并等它真的出来（动画要点时间，最多 3 秒）"""
+        for attempt in range(1, 4):
+            img = self._open_hero()
+            if img is None:
+                return None, None
+            btn, ready = self._wh_anchor(img)
+            if ready:
+                return img, btn
+            pos = self._row(img)["仓库"]
+            self.log("点「仓库」六边形 (%d,%d)" % pos)
+            if not self._click(*pos):
+                return None, None
+            for _ in range(5):
+                time.sleep(0.60)
+                img = self._shot()
+                btn, ready = self._wh_anchor(img)
+                if ready:
+                    return img, btn
+            self.log("第 %d 次点开仓库没成功，再试一次" % attempt)
+            self.esc(1)          # 可能卡着别的面板（比如魔方），收掉一层再来
+        return None, None
+
+    def _wh_frac(self, img, btn):
+        sc = self.sc
+        dx, dy, w, h = (v * sc for v in self.WH_GRID)
+        x0, y0 = btn[0] + int(dx), btn[1] + int(dy)
+        x1, y1 = min(img.shape[1], x0 + int(w)), min(img.shape[0], y0 + int(h))
+        x0, y0 = max(0, x0), max(0, y0)
+        if x1 - x0 < 80 * sc or y1 - y0 < 80 * sc:
