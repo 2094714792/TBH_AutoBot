@@ -1,7 +1,7 @@
-=== TBH 自动挂机助手 打包 ===
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+echo === TBH 自动挂机助手 打包 ===
 
 rem —— 找一个真能用的解释器（PATH 里的 python 可能是别的运行时装出来的）
 set "PY=py -3"
