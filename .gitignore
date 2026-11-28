@@ -4,7 +4,7 @@ dist/
 __pycache__/
 *.pyc
 test_debug.png
-dev/
+dev/*.png
+dev/*.log
 config.json
 .ghtoken
-*.exe
