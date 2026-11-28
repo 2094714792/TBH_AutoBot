@@ -1,0 +1,189 @@
+    x1 = min(r, mon["left"] + mon["width"])
+    y1 = min(b, mon["top"] + mon["height"])
+    return (int(x0), int(y0), max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+
+
+REF_VIEW_W = 970.0          # 拍模板时游戏窗口的可见宽度，UI 缩放的基准
+
+
+def ui_scale(hwnd, sct=None):
+    """游戏 UI 相对模板基准的缩放倍数 = 可见宽度 / 970（限幅 0.65~1.8）
+       窗口被拉大/拉小后，模板与按钮偏移都按这个倍数一起缩放。"""
+    try:
+        return max(0.65, min(1.8, game_view_rect(hwnd, sct)[2] / REF_VIEW_W))
+    except Exception:
+        return 1.0
+
+
+def force_foreground(hwnd):
+    """把窗口抢到前台：先最小化→恢复（实测最稳），不行再用 ALT 唤醒 + SetForegroundWindow"""
+    try:
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return False
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+        if not win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+            time.sleep(0.28)
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        time.sleep(0.40)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+        ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
+        time.sleep(0.02)
+        ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.35)
+        return win32gui.GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
+# ---------------- 模板图集 ----------------
+# 所有模板都打在 templates.png 里，这里只登记切片坐标；改模板用 tools/pack_templates.py
+TPLS = {
+    "card_tpl":     (2, 2, 62, 44),
+    "arrow_icon":   (68, 2, 25, 29),
+    "hex_store":    (97, 2, 52, 52),
+    "hex_attr":     (153, 2, 52, 52),
+    "hex_rune":     (209, 2, 52, 52),
+    "hex_cube":     (265, 2, 52, 52),
+    "hex_gem":      (321, 2, 52, 52),
+    "wh_store":     (377, 2, 138, 48),
+    "wh_back":      (519, 2, 106, 48),
+    "cube_fill":    (629, 2, 122, 40),
+    "cube_exec_on": (755, 2, 98, 37),
+    "cube_exec_off": (857, 2, 98, 37),
+}
+_ATLAS = None
+_TPL_CACHE = {}
+
+
+def load_tpl(name, sc=1.0):
+    """按名字取模板切片并可按 sc 缩放（游戏窗口大小变了 UI 会跟着缩放）；
+       name 可带或不带 .png"""
+    key = name[:-4] if name.endswith(".png") else name
+    sc = round(float(sc), 2)
+    if (key, sc) in _TPL_CACHE:
+        return _TPL_CACHE[(key, sc)]
+    global _ATLAS
+    if _ATLAS is None:
+        p = os.path.join(BASE_DIR, "templates.png")
+        _ATLAS = cv2.imread(p) if os.path.exists(p) else np.zeros((0, 0, 3), np.uint8)
+    sl = TPLS.get(key)
+    img = None
+    if sl and _ATLAS.size:
+        x, y, w, h = sl
+        img = _ATLAS[y:y + h, x:x + w].copy()
+        if img.size == 0:
+            img = None
+    if img is not None and sc != 1.0:
+        img = cv2.resize(img, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+    _TPL_CACHE[(key, sc)] = img
+    return img
+
+
+# ---------------- 卡片识别 ----------------
+def find_cards(img, cfg, loose=False):
+    """近白卡片 + 灰边框环校验 → [{box, center, blue, score}]"""
+    v = int(cfg["white_v_low"] if loose else cfg["white_v"])
+    s = int(cfg["white_s_low"] if loose else cfg["white_s"])
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    white = ((hsv[:, :, 2] >= v) & (hsv[:, :, 1] <= s)).astype(np.uint8)
+    if not white.any():
+        return []
+    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, lab, stats, _cent = cv2.connectedComponentsWithStats(white, 8)
+    cards = []
+    for i in range(1, n):
+        x, y, w, h, a = (int(v2) for v2 in stats[i])
+        if not (cfg["min_area"] <= a <= cfg["max_area"]) or w < 16 or h < 12:
+            continue
+        aspect = w / float(h)
+        if not 0.9 <= aspect <= 2.2:
+            continue
+        fill = a / float(w * h)
+        if fill < 0.42:
+            continue
+        # ---- 形状校验：卡片是规整圆角矩形，白色特效/壁纸/烟雾过不了 ----
+        m = (lab[y:y + h, x:x + w] == i).astype(np.uint8)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        cnt = max(cnts, key=cv2.contourArea)
+        ca = cv2.contourArea(cnt)
+        solid = ca / max(cv2.contourArea(cv2.convexHull(cnt)), 1.0)
+        rect = ca / float(w * h)
+        if len(cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)) > 8:
+            continue
+        band = 2
+        edge = float(np.mean([m[:band, :].mean(), m[-band:, :].mean(),
+                              m[:, :band].mean(), m[:, -band:].mean()]))
+        if solid < cfg["solid_min"] or rect < cfg["rect_min"] or edge < cfg["edge_min"]:
+            continue
+        # ---- 蓝框判定：只看卡片自己的边框带（不受背景颜色影响）----
+        bh = hsv[y + 1:y + h - 1, x + 1:x + w - 1]
+        bm = np.zeros((max(h - 2, 1), max(w - 2, 1)), bool)
+        bm[:2, :] = bm[-2:, :] = True
+        bm[:, :2] = bm[:, -2:] = True
+        band_px = bh[bm] if bh.size else np.zeros((0, 3), np.uint8)
+        blue_frac = 0.0
+        if len(band_px) >= 20:
+            blue_frac = np.count_nonzero(
+                (band_px[:, 0] >= 88) & (band_px[:, 0] <= 142) &
+                (band_px[:, 1] >= 85) & (band_px[:, 2] >= 60)) / float(len(band_px))
+        cards.append(dict(box=(x, y, w, h), center=(x + w // 2, y + h // 2),
+                          blue=blue_frac >= cfg["blue_frac"], score=float(solid),
+                          fill=float(fill), rect=float(rect), blue_frac=float(blue_frac)))
+    cards.sort(key=lambda c: (not c["blue"], c["center"][0]))
+    return cards
+
+
+def find_cards_tpl(img, cfg, thr=None, sc=1.0):
+    """模板匹配找宝箱卡片：白色窗口/网页挡在后面也能查出（白底会吞掉白色阈值法）
+       sc 是当前 UI 缩放，围绕它做 ±10% 的微调"""
+    tpl = load_tpl("card_tpl")
+    H, W = img.shape[:2]
+    if tpl is None or H < tpl.shape[0] + 6 or W < tpl.shape[1] + 6:
+        return []
+    thr = float(cfg.get("tpl_score", 0.62)) if thr is None else thr
+    hits = []
+    for k in (0.90, 0.94, 0.97, 1.00, 1.03, 1.06, 1.10):
+        s = sc * k
+        t = cv2.resize(tpl, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        if t.shape[0] >= H or t.shape[1] >= W:
+            continue
+        res = cv2.matchTemplate(img, t, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(res >= thr)
+        for y, x in zip(ys, xs):
+            hits.append((float(res[y, x]), int(x), int(y), t.shape[1], t.shape[0]))
+    picks = []
+    for s, x, y, w, h in sorted(hits, reverse=True):
+        if all(abs(x - px) > w * 0.55 or abs(y - py) > h * 0.55 for _s, px, py, _w, _h in picks):
+            picks.append((s, x, y, w, h))
+        if len(picks) >= 5:
+            break
+    cards = [dict(box=(x, y, w, h), center=(x + w // 2, y + h // 2), blue=False,
+                  score=s, fill=1.0, rect=1.0, blue_frac=0.0, tpl=True)
+             for s, x, y, w, h in picks]
+    cards.sort(key=lambda c: c["center"][0])
+    return cards
+
+
+def detect_cards(img, cfg, sc=1.0):
+    """三级识别：模板 → 白色阈值(严) → 白色阈值(松)；面积阈值按 UI 缩放调整"""
+    c = cfg
+    if abs(sc - 1.0) > 0.05:                # 卡片像素面积随 UI 缩放成平方变化
+        c = dict(cfg)
+        c["min_area"] = cfg["min_area"] * sc * sc
+        c["max_area"] = cfg["max_area"] * sc * sc
+    return (find_cards_tpl(img, cfg, sc=sc) or find_cards(img, c)
+            or find_cards(img, c, loose=True))
+
+
+def draw_debug(img, cards, region, extra=""):
+    dbg = img.copy()
+    for c in cards:
+        x, y, w, h = c["box"]
+        col = (255, 120, 0) if c["blue"] else (0, 220, 0)
+        cv2.rectangle(dbg, (x, y), (x + w, y + h), col, 2)
