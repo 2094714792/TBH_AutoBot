@@ -1,0 +1,177 @@
+            self.log("提示：该窗口面积较大，建议点“框选区域”只框住宝箱出现的位置")
+        with contextlib.suppress(Exception):
+            s = ui_scale(sel["hwnd"], self._sct)
+            if abs(s - 1.0) > 0.04:
+                v = game_view_rect(sel["hwnd"], self._sct)
+                self.log("游戏窗口 %dx%d，UI 缩放 ×%.2f，识别会自动跟着缩（不用重拍模板）"
+                         % (v[2], v[3], s))
+
+    def auto_detect(self):
+        """自动识别游戏：找窗口 → 锁定跟随右下角 → 试识别一次"""
+        g = find_game_hwnd()
+        if not g:
+            self.refresh()
+            messagebox.showwarning("没找到游戏窗口",
+                                   "没有发现 UnityWndClass / 标题含 TaskBarHero 的窗口。\n"
+                                   "请先把游戏打开（不用手动选窗口）。")
+            return
+        hwnd, cls, title = g
+        if not any(w["hwnd"] == hwnd for w in self.windows):
+            self.refresh()
+        idx = next((i for i, w in enumerate(self.windows) if w["hwnd"] == hwnd), None)
+        if idx is None:
+            self.windows.insert(0, dict(hwnd=hwnd, cls=cls, title=title,
+                                        rect=win32gui.GetWindowRect(hwnd), score=9))
+            self._fill_windows()
+            idx = 0
+        self.cb.current(idx)
+        self.cfg["hwnd"] = hwnd
+        self.cfg["hwnd_title"] = title
+        self.cfg["follow"] = True
+        self.cfg["region"] = None
+        self.follow.set(True)
+        self.lbl_region.config(text=self.region_text())
+        r = game_view_rect(hwnd, self._sct)
+        self.log("已锁定游戏窗口：%s（%s），屏幕内可见区 %d×%d @(%d,%d)" % (
+            title or cls, cls, r[2], r[3], r[0], r[1]))
+        try:
+            region = resolve_region(self._sct, self.cfg)
+            cards = detect_cards(grab(self._sct, region), self.cfg,
+                                 ui_scale(self.cfg.get("hwnd"), self._sct))
+            self.log("检测区域 %d×%d，当前画面认出 %d 张卡片%s" % (
+                region[2], region[3], len(cards),
+                "" if cards else "（可以先点「测试识别」看预览图）"))
+        except Exception as e:
+            self.log("区域自检失败：%s" % e)
+
+    def _toggle_follow(self):
+        self.cfg["follow"] = bool(self.follow.get())
+        if self.cfg["follow"]:
+            self.cfg["region"] = None
+        self.lbl_region.config(text=self.region_text())
+        self.log("检测区域：%s" % ("跟随游戏窗口右下角" if self.cfg["follow"] else "使用框选区域"))
+
+    def pull_cfg(self):
+        for k, var in self.vars.items():
+            txt = var.get().strip()
+            try:
+                self.cfg[k] = float(txt) if k in FLOAT_KEYS else int(float(txt))
+            except ValueError:
+                self.log("参数 %s 输入无效，保留原值" % k)
+        self.cfg["blue_only"] = bool(self.blue_only.get())
+        self.cfg["debug"] = bool(self.debug.get())
+        for k, var in self.panel_vars.items():
+            try:
+                self.cfg[k] = int(float(var.get().strip()))
+            except ValueError:
+                self.log("参数 %s 输入无效，保留原值" % k)
+        for k, var in (("bag", self.bag), ("cube", self.cube),
+                       ("fg_steal", self.fg_steal), ("follow", self.follow)):
+            if hasattr(self, k):
+                self.cfg[k] = bool(var.get())
+        i = self.cb.current()
+        if i >= 0:
+            self.cfg["hwnd"] = self.windows[i]["hwnd"]
+            self.cfg["hwnd_title"] = self.windows[i]["title"]
+        return self.cfg
+
+    def select_region(self):
+        alive = bool(self.eng and self.eng.is_alive())
+        was_paused = bool(self.eng and self.eng.paused)
+        if alive:
+            self.eng.paused = True
+            self.log("框选期间已暂停引擎")
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        ov = tk.Toplevel(self)
+        ov.overrideredirect(True)
+        ov.attributes("-topmost", True)
+        ov.attributes("-alpha", 0.42)
+        ov.geometry("%dx%d+0+0" % (sw, sh))
+        cv = tk.Canvas(ov, bg="#0B0C0F", highlightthickness=0, cursor="cross")
+        cv.pack(fill="both", expand=True)
+        cv.create_text(sw // 2, 40, text="按住鼠标左键框出宝箱出现的区域 · Esc 取消",
+                       fill=ACCENT, font=(FONT, 15, "bold"))
+        st = {"rect": None}
+
+        def finish():
+            with contextlib.suppress(Exception):
+                ov.destroy()
+            if alive and not was_paused and self.eng:
+                self.eng.paused = False
+                self.log("引擎已继续")
+
+        def on_down(e):
+            st["x0"], st["y0"] = e.x, e.y
+            st["rect"] = cv.create_rectangle(e.x, e.y, e.x, e.y, outline=ACCENT, width=2)
+            st["hint"] = cv.create_text(e.x + 8, e.y - 14, text="", fill=ACCENT,
+                                        font=(MONO, 10), anchor="sw")
+
+        def on_move(e):
+            if st["rect"]:
+                cv.coords(st["rect"], st["x0"], st["y0"], e.x, e.y)
+                cv.itemconfig(st["hint"], text="%d × %d" % (abs(e.x - st["x0"]), abs(e.y - st["y0"])))
+
+        def on_up(e):
+            x0, y0 = min(st["x0"], e.x), min(st["y0"], e.y)
+            x1, y1 = max(st["x0"], e.x), max(st["y0"], e.y)
+            finish()
+            if x1 - x0 < 40 or y1 - y0 < 24:
+                self.log("框选区域太小，已放弃")
+                return
+            self.cfg["region"] = [x0, y0, x1 - x0, y1 - y0]
+            self.cfg["follow"] = False
+            self.follow.set(False)
+            self.lbl_region.config(text=self.region_text())
+            self.log("已设置检测区域 %d,%d %dx%d" % (x0, y0, x1 - x0, y1 - y0))
+            self.after(200, self.test)
+
+        cv.bind("<ButtonPress-1>", on_down)
+        cv.bind("<B1-Motion>", on_move)
+        cv.bind("<ButtonRelease-1>", on_up)
+        esc = lambda e: (finish(), self.log("已取消框选"))
+        cv.bind("<Escape>", esc)
+        ov.bind("<Escape>", esc)
+        ov.focus_force()
+        cv.focus_set()
+
+    def clear_region(self):
+        self.cfg["region"] = None
+        self.cfg["follow"] = True
+        self.follow.set(True)
+        self.lbl_region.config(text=self.region_text())
+        self.log("已清除框选区域，改为跟随游戏窗口右下角")
+
+    # ---- 识别测试 / 控制 ----
+    def test(self):
+        c = self.pull_cfg()
+        try:
+            region = resolve_region(self._sct, c)
+            img = grab(self._sct, region)
+        except Exception as e:
+            messagebox.showwarning("提示", str(e))
+            return
+        cards = detect_cards(img, c, ui_scale(c.get("hwnd"), self._sct))
+        if self.imgq.qsize() < 3:
+            try:
+                self.imgq.put_nowait(draw_debug(img, cards, region, "test"))
+            except queue.Full:
+                pass
+        self.log("测试：区域%s 尺寸%dx%d 找到 %d 张卡片 %s" % (
+            region, img.shape[1], img.shape[0], len(cards),
+            ", ".join("%s@%s solid%.2f" % ("蓝" if x["blue"] else "白", x["box"], x["score"])
+                      for x in cards)))
+
+    def start(self):
+        if self.eng and self.eng.is_alive():
+            self.log("引擎还在停止中，请稍候再启动")
+            return
+        c = self.pull_cfg()
+        if not c.get("region") and not c.get("hwnd"):
+            messagebox.showwarning("提示", "先选窗口或框选区域")
+            return
+        try:
+            resolve_region(self._sct, c)
+        except Exception as e:
+            messagebox.showwarning("提示", str(e))
+            return
+        self.eng = Engine(self.cfg, self.logq, self.imgq)
