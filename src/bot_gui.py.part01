@@ -1,0 +1,223 @@
+# -*- coding: utf-8 -*-
+"""TBH 自动挂机助手 v1.4
+   宝箱卡片自动识别点击 + 背包/仓库/魔方巡检
+
+   设计要点
+   - 点击只在前台生效：游戏是透明置顶窗口，不在前台时点击会穿透到桌面/别的软件
+   - 检测区域默认跟随游戏窗口右下角（窗口会随面板开合改变尺寸/位置）
+   - 卡片识别：模板匹配 → 白色阈值(严) → 白色阈值(松)，白底网页压着卡片也能认
+   - 面板坐标一律按「顶部 banner 相对偏移」算，不用屏幕绝对坐标
+   - 点击后校验画面是否变化，同一位置反复无变化自动跳过
+   - 模板统一打在 templates.png 图集里（tools/pack_templates.py 可拆可重打）
+"""
+import contextlib
+import ctypes
+import json
+import os
+import queue
+import random
+import sys
+import threading
+import time
+import traceback
+
+import cv2
+import mss
+import numpy as np
+import pyautogui as pg
+import win32con
+import win32gui
+from PIL import Image, ImageTk
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    with contextlib.suppress(Exception):
+        ctypes.windll.user32.SetProcessDPIAware()
+
+pg.FAILSAFE = True
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CFG_PATH = os.path.join(BASE_DIR, "config.json")
+
+DEFAULT = dict(
+    hwnd_title="", interval=0.8, card_cd=1.0, region=None,
+    follow=1, rel_w=480, rel_h=200, rel_right=20, rel_bottom=300,
+    pad_up=140, pad_side=20,
+    white_v=216, white_s=46, white_v_low=196, white_s_low=62,
+    min_area=600, max_area=9000,
+    solid_min=0.92, rect_min=0.85, edge_min=0.60, blue_frac=0.30, card_diff=6.0,
+    blue_only=False, max_retry=4, retry_cd=25.0, debug=True,
+    bag=0, bag_interval=600, wh_click=3, cube=0, cube_times=3, fg_steal=1,
+)
+FLOAT_KEYS = ("interval", "card_cd", "retry_cd", "card_diff", "solid_min", "rect_min")
+
+
+def new_sct():
+    """每个线程各自持有一个 mss 实例（mss 的 GDI 句柄不跨线程共享）"""
+    return mss.mss() if hasattr(mss, "mss") else mss.MSS()
+
+
+def _win_pid(hwnd):
+    """窗口所属进程 pid（取不到返回 0）"""
+    pid = ctypes.c_ulong()
+    try:
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    except Exception:
+        return 0
+    return pid.value
+
+
+# ---------------- 窗口 ----------------
+SKIP_CLASS = ("Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW",
+              "Windows.UI.Core.CoreWindow", "ApplicationManager", "TaskBarHero_Helper")
+
+
+def enum_windows():
+    """枚举候选窗口，排除任务栏/桌面/本程序自身；score 越高越像游戏"""
+    out = []
+    me = os.getpid()
+
+    def cb(h, _):
+        try:
+            if not win32gui.IsWindowVisible(h) or win32gui.IsIconic(h):
+                return
+            l, t, r, b = win32gui.GetWindowRect(h)
+            w, ht = r - l, b - t
+            if w < 120 or ht < 25:
+                return
+            cls = win32gui.GetClassName(h)
+            if any(k in cls for k in ("Chrome", "Mozilla", "CefBrowser")):
+                return
+            if cls in SKIP_CLASS or cls.startswith("Tk"):
+                return
+            if _win_pid(h) == me:
+                return
+            ex = win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE)
+            s = 2 if w / max(ht, 1) >= 2.0 else 0
+            s += 2 if ht < 260 else 0
+            s += 2 if ex & 0x80000 else 0          # WS_EX_LAYERED
+            s += 1 if ex & 0x80 else 0             # WS_EX_TOOLWINDOW
+            title = win32gui.GetWindowText(h)
+            s += 1 if not title else 0
+            out.append(dict(hwnd=h, cls=cls, title=title, rect=(l, t, w, ht), score=s))
+        except Exception:
+            pass
+
+    win32gui.EnumWindows(cb, None)
+    return sorted(out, key=lambda d: (-d["score"], -d["rect"][1]))
+
+
+def resolve_region(sct, cfg):
+    """优先跟随游戏窗口右下角；否则用框选区域 / 窗口矩形"""
+    mon = sct.monitors[0]
+    hwnd = cfg.get("hwnd")
+    if cfg.get("follow") and hwnd and win32gui.IsWindow(hwnd):
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        w, h = int(cfg.get("rel_w", 480)), int(cfg.get("rel_h", 200))
+        l = r - int(cfg.get("rel_right", 20)) - w
+        t = b - int(cfg.get("rel_bottom", 300))
+    else:
+        reg = cfg.get("region")
+        if reg:
+            try:
+                l, t, w, h = (int(v) for v in reg)
+            except Exception:
+                l = t = w = h = 0
+            if w <= 0 or h <= 0:
+                raise RuntimeError("框选区域无效")
+        else:
+            if not hwnd:
+                raise RuntimeError("未选择窗口，也没有框选区域")
+            if not win32gui.IsWindow(hwnd):
+                raise RuntimeError("目标窗口已关闭")
+            l, t, r, b = win32gui.GetWindowRect(hwnd)
+            w, h = r - l, b - t
+            pu, ps = int(cfg["pad_up"]), int(cfg["pad_side"])
+            l, t = l - ps, t - pu
+            w, h = w + 2 * ps, h + pu
+    x0, y0 = max(l, mon["left"]), max(t, mon["top"])
+    x1 = min(l + w, mon["left"] + mon["width"])
+    y1 = min(t + h, mon["top"] + mon["height"])
+    if x1 - x0 < 24 or y1 - y0 < 16:
+        raise RuntimeError("检测区域落在屏幕外或过小：%s" % ((l, t, w, h),))
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def point_blocked(x, y, hwnd):
+    """该点是否被“别的程序”挡住。桌面/任务栏/游戏自身窗口一律不算遮挡。
+       返回 (blocked, 说明)。"""
+    if not hwnd:
+        return False, ""
+    try:
+        h = win32gui.WindowFromPoint((x, y))
+        if not h:
+            return False, ""
+        cls = win32gui.GetClassName(h)
+        if cls in SKIP_CLASS or cls.startswith("Tk"):
+            return False, ""
+        if cls == "SysListView32" or win32gui.GetWindowText(h) == "FolderView":
+            return False, ""                      # 桌面图标层
+        if _win_pid(h) and _win_pid(h) == _win_pid(hwnd):
+            return False, ""                      # 游戏自己的窗口
+        r = win32gui.GetWindowRect(h)
+        if not (r[0] <= x < r[2] and r[1] <= y < r[3]):
+            return False, ""
+        if win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE) & 0x20:   # 点击穿透
+            return False, ""
+        return True, "%s|%s" % (cls, win32gui.GetWindowText(h)[:28])
+    except Exception:
+        return False, ""
+
+
+def grab(sct, region):
+    l, t, w, h = region
+    if w <= 0 or h <= 0:
+        raise RuntimeError("区域无效 %s" % (region,))
+    return np.array(sct.grab({"left": l, "top": t, "width": w, "height": h}))[:, :, :3].copy()
+
+
+def grab_all(sct):
+    mon = sct.monitors[0]
+    return np.array(sct.grab(mon))[:, :, :3].copy()
+
+
+def find_game_hwnd():
+    """自动识别游戏窗口：优先 UnityWndClass，其次标题/类名含 TaskBarHero"""
+    out = []
+
+    def cb(h, _):
+        try:
+            if not win32gui.IsWindowVisible(h) or win32gui.IsIconic(h):
+                return
+            cls = win32gui.GetClassName(h)
+            t = win32gui.GetWindowText(h)
+            if cls == "UnityWndClass" or "TaskBarHero" in t or "TaskBarHero" in cls:
+                out.append((h, cls, t))
+        except Exception:
+            pass
+
+    win32gui.EnumWindows(cb, None)
+    if not out:
+        return None
+    out.sort(key=lambda x: 0 if x[1] == "UnityWndClass" else 1)
+    return out[0]
+
+
+def game_view_rect(hwnd, sct=None):
+    """游戏在屏幕上的可见矩形 = 窗口矩形 ∩ 屏幕（一部分拖出屏幕也不会算错）"""
+    s = sct or new_sct()
+    mon = s.monitors[0]
+    l, t, r, b = win32gui.GetWindowRect(hwnd)
+    x0, y0 = max(l, mon["left"]), max(t, mon["top"])
+    x1 = min(r, mon["left"] + mon["width"])
+    y1 = min(b, mon["top"] + mon["height"])
+    return (int(x0), int(y0), max(1, int(x1 - x0)), max(1, int(y1 - y0)))
+
+
+
