@@ -55,6 +55,7 @@ def main():
     print("整屏 %dx%d，模板打分：" % (img.shape[1], img.shape[0]))
     score_all(img)
     bot = B.PanelBot(dict(B.DEFAULT, hwnd=g[0]), queue.Queue())
+    bot.sc = B.ui_scale(g[0])       # 面板类只在 store() 里刷新 sc，这里先自己算一次
     print("UI 缩放 ×%.2f" % bot.sc)
     row = bot._row(img)
     print("六边形行:", row or "（英雄面板没开）")
