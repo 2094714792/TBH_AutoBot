@@ -140,7 +140,7 @@ def find_cards(img, cfg, loose=False):
 
 
 def find_cards_tpl(img, cfg, thr=None, sc=1.0):
-    """模板匹配找宝箱卡片：白色窗口/网页挡在后面也能查出（白底会吞掉白色阈值法）
+    """模板匹配找宝箱卡片：白色窗口/网页挡在后面也能认出（白底会吞掉白色阈值法）
        sc 是当前 UI 缩放，围绕它做 ±10% 的微调"""
     tpl = load_tpl("card_tpl")
     H, W = img.shape[:2]
