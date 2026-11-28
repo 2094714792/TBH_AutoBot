@@ -1,0 +1,145 @@
+            tk.Label(f, text=label, bg=PANEL, fg=SUB, font=(FONT, 8)).pack(anchor="w")
+            v = tk.StringVar(value=str(self.cfg.get(k, d)))
+            self._entry(b2, v).grid(row=r * 2 + 1, column=c, sticky="w", padx=(0, 16), pady=(2, 6))
+            self.vars[k] = v
+        opt = tk.Frame(b2, bg=PANEL)
+        opt.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.blue_only = tk.BooleanVar(value=bool(self.cfg["blue_only"]))
+        self.debug = tk.BooleanVar(value=bool(self.cfg["debug"]))
+        for txt, var in (("只点蓝框卡片", self.blue_only), ("显示识别预览", self.debug)):
+            _chk(opt, txt, var).pack(side="left", padx=(0, 16))
+
+    def _build_control(self):
+        wrap, b3 = self._card(self, "③ 运行控制")
+        wrap.pack(fill="x", padx=18, pady=(0, 8))
+        ctl = tk.Frame(b3, bg=PANEL)
+        ctl.pack(side="left")
+        self.btn_start = _btn(ctl, "开始", kind="primary", cmd=self.start)
+        self.btn_start.pack(side="left")
+        for txt, cmd in (("暂停 / 继续", self.toggle), ("停止", self.stop), ("保存配置", self.save)):
+            _btn(ctl, txt, cmd=cmd).pack(side="left", padx=(8, 0))
+        tk.Label(b3, text="F8 暂停 · F12 停止", bg=PANEL, fg=SUB,
+                 font=(FONT, 8)).pack(side="left", padx=(14, 0))
+        stats = tk.Frame(b3, bg=PANEL)
+        stats.pack(side="right")
+        self.stat_vals = {}
+        for key, cap, color in (("rounds", "轮次", TEXT), ("clicks", "点击", ACCENT),
+                                ("hits", "有效", OK), ("state", "状态", WARN)):
+            tile = tk.Frame(stats, bg=PANEL2, highlightthickness=1,
+                            highlightbackground=BORDER, padx=14, pady=4)
+            tile.pack(side="left", padx=(8, 0))
+            tk.Label(tile, text=cap, bg=PANEL2, fg=SUB, font=(FONT, 7)).pack(anchor="w")
+            val = tk.Label(tile, text="0", bg=PANEL2, fg=color, font=(FONT, 13, "bold"))
+            val.pack(anchor="w")
+            self.stat_vals[key] = val
+
+    def _build_panel(self):
+        wrap, b4 = self._card(self, "④ 背包 / 仓库 / 魔方",
+                              "金盾开英雄面板 → 点「仓库」六边形存仓 → 点「魔方」合成")
+        wrap.pack(fill="x", padx=18, pady=(0, 8))
+        self.bag = tk.BooleanVar(value=bool(self.cfg.get("bag", 0)))
+        self.cube = tk.BooleanVar(value=bool(self.cfg.get("cube", 0)))
+        self.fg_steal = tk.BooleanVar(value=bool(self.cfg.get("fg_steal", 1)))
+        self.panel_vars = {}
+
+        row = tk.Frame(b4, bg=PANEL)
+        row.pack(fill="x")
+        _chk(row, "定时巡检背包（满了自动存仓）", self.bag).pack(side="left")
+        for k, label, w in (("bag_interval", "间隔(s)", 7), ("wh_click", "存仓点击", 6)):
+            self._num(row, k, label, w).pack(side="left", padx=(14, 0))
+        _btn(row, "立即巡检一次", cmd=self.check_bag).pack(side="left", padx=(16, 0))
+
+        row2 = tk.Frame(b4, bg=PANEL)
+        row2.pack(fill="x", pady=(8, 0))
+        _chk(row2, "仓库也满时用魔方合成（会消耗 9 件同等级装备）", self.cube).pack(side="left")
+        self._num(row2, "cube_times", "合成次数", 6).pack(side="left", padx=(14, 0))
+        tk.Label(row2, text="默认关闭：合成不可撤销，想用再打勾", bg=PANEL, fg=WARN,
+                 font=(FONT, 8)).pack(side="left", padx=(14, 0))
+
+        row3 = tk.Frame(b4, bg=PANEL)
+        row3.pack(fill="x", pady=(8, 0))
+        _chk(row3, "巡检前自动把游戏切到前台（做完还回去）", self.fg_steal).pack(side="left")
+        tk.Label(row3, text="不勾就只在你把游戏放最前时才巡检", bg=PANEL, fg=SUB,
+                 font=(FONT, 8)).pack(side="left", padx=(14, 0))
+
+    def _num(self, parent, key, label, width):
+        """label + 数字输入框（值存进 self.panel_vars，pull_cfg 统一回收）"""
+        f = tk.Frame(parent, bg=PANEL)
+        tk.Label(f, text=label, bg=PANEL, fg=SUB, font=(FONT, 8)).pack(side="left", padx=(0, 5))
+        v = tk.StringVar(value=str(self.cfg.get(key)))
+        self._entry(f, v, width=width).pack(side="left")
+        self.panel_vars[key] = v
+        return f
+
+    def _build_body(self):
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+        body.columnconfigure(0, weight=1, uniform="c")
+        body.columnconfigure(1, weight=1, uniform="c")
+        body.rowconfigure(0, weight=1, minsize=250)
+
+        wrapL, bl = self._card(body, "识别预览")
+        wrapL.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.canvas = tk.Label(bl, bg="#101114", bd=0, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda e: self._render_preview())
+        self.lbl_prev = tk.Label(bl, text="等待识别…", bg="#101114", fg=SUB,
+                                 font=(MONO, 8), anchor="e")
+        self.lbl_prev.pack(fill="x", pady=(4, 0))
+
+        wrapR, br = self._card(body, "运行日志")
+        wrapR.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        logbox = tk.Frame(br, bg="#101114")
+        logbox.pack(fill="both", expand=True)
+        self.txt = tk.Text(logbox, bg="#101114", fg="#C5CAD1", insertbackground=ACCENT,
+                           relief="flat", bd=0, wrap="word", padx=10, pady=8,
+                           width=1, height=8, font=(MONO, 9), selectbackground="#2F4C63")
+        self.txt.pack(fill="both", expand=True)
+        for tag, color in (("time", "#5B6270"), ("info", "#C5CAD1"), ("ok", OK),
+                           ("hit", ACCENT), ("warn", WARN), ("err", ERR)):
+            self.txt.tag_config(tag, foreground=color)
+
+    # ---- 区域 ----
+    def region_text(self):
+        if self.cfg.get("follow"):
+            hwnd = self.cfg.get("hwnd")
+            try:
+                if hwnd and win32gui.IsWindow(hwnd):
+                    l, t, r, b = win32gui.GetWindowRect(hwnd)
+                    w, h = int(self.cfg.get("rel_w", 480)), int(self.cfg.get("rel_h", 200))
+                    x = r - int(self.cfg.get("rel_right", 20)) - w
+                    y = b - int(self.cfg.get("rel_bottom", 300))
+                    return "跟随右下角 %d,%d %d×%d" % (x, y, w, h)
+            except Exception:
+                pass
+            return "跟随右下角（待刷新）"
+        r = self.cfg.get("region")
+        if r:
+            return "区域 %d,%d %d×%d" % tuple(r)
+        return "跟随窗口（建议框选）"
+
+    def _fill_windows(self):
+        self.cb["values"] = ['[%d] %dx%d @(%d,%d) score=%d "%s" %s' % (
+            i, w["rect"][2], w["rect"][3], w["rect"][0], w["rect"][1],
+            w["score"], w["title"][:24], w["cls"][:22]) for i, w in enumerate(self.windows)]
+
+    def refresh(self):
+        self.windows = enum_windows()
+        self._fill_windows()
+        if not self.windows:
+            return
+        g = find_game_hwnd()          # 优先自动认出游戏窗口
+        idx = next((i for i, w in enumerate(self.windows) if g and w["hwnd"] == g[0]), None)
+        if idx is None:
+            t = self.cfg.get("hwnd_title") or ""
+            idx = next((i for i, w in enumerate(self.windows) if t and w["title"] == t), 0)
+        self.cb.current(idx)
+        sel = self.windows[idx]
+        self.cfg["hwnd"] = sel["hwnd"]
+        self.cfg["hwnd_title"] = sel["title"]
+        self.lbl_region.config(text=self.region_text())
+        self.log("发现 %d 个窗口，当前目标：%s  %dx%d @(%d,%d)" % (
+            len(self.windows), sel["title"] or sel["cls"],
+            sel["rect"][2], sel["rect"][3], sel["rect"][0], sel["rect"][1]))
+        mon = self._sct.monitors[0]
+        if sel["rect"][2] * sel["rect"][3] > 0.35 * mon["width"] * mon["height"]:
