@@ -1,0 +1,185 @@
+        self.eng.start()
+        self.after(40, self._activate_game)
+        self._start_panel()
+        self._start_btn(False)
+        self.pill.config(text=" 运行 ", bg=ACCENT, fg="#0A1016")
+
+    def _activate_game(self):
+        """点“开始”时前台是本程序，此刻才允许把游戏切到前台（过后会被前台锁挡住）"""
+        hwnd = self.cfg.get("hwnd")
+        if not hwnd:
+            return
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.2)
+            if win32gui.GetForegroundWindow() == hwnd:
+                self.log("已把游戏窗口切到前台，开始挂机")
+            else:
+                self.log("提示：Windows 前台锁没放行，请手动点一下游戏画面，否则点击会穿透到桌面")
+        except Exception as e:
+            self.log("切换前台失败：%s" % e)
+
+    def _start_panel(self):
+        self._stop_panel()
+        if not self.cfg.get("bag"):
+            return
+        self.panelbot = PanelBot(self.cfg, self.logq, self.eng)
+        self.panelbot.start()
+        self.log("背包巡检已启动：每 %d 秒一轮，存仓点击 %d 次" % (
+            int(self.cfg.get("bag_interval", 600)), int(self.cfg.get("wh_click", 3))))
+
+    def _stop_panel(self):
+        pb = self.panelbot
+        if pb and pb.is_alive():
+            pb.stop()
+        self.panelbot = None
+
+    def check_bag(self):
+        c = self.pull_cfg()
+        if not c.get("hwnd"):
+            messagebox.showwarning("提示", "先在①里选好游戏窗口")
+            return
+        self.log("手动巡检一次：先把游戏切到前台…")
+        self._stop_panel()
+        pb = PanelBot(self.cfg, self.logq, self.eng)
+
+        def work():
+            try:
+                if not panel_pass(pb):
+                    self.log("切不到游戏前台，巡检取消")
+            except Exception as e:
+                self.log("巡检失败：%s" % e)
+                with contextlib.suppress(Exception):
+                    pb.esc(1)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_btn(self, enabled):
+        if enabled:
+            self.btn_start.config(state="normal", text="开始", bg=ACCENT,
+                                    fg="#0A1016", activebackground=ACCENT_H, cursor="hand2")
+        else:
+            self.btn_start.config(state="disabled", text="运行中", bg="#2C2F35",
+                                    fg="#6E747D", activebackground="#2C2F35", cursor="arrow")
+
+    def toggle(self):
+        if self.eng and self.eng.is_alive():
+            self.eng.paused = not self.eng.paused
+            self.log("暂停" if self.eng.paused else "继续")
+
+    def stop(self):
+        self._stop_panel()
+        if self.eng and self.eng.is_alive():
+            self.eng.stop()
+            self.log("正在停止…")
+        else:
+            self._start_btn(True)
+            self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+
+    def save(self):
+        self.pull_cfg()
+        try:
+            with open(CFG_PATH, "w", encoding="utf-8") as f:
+                json.dump({k: v for k, v in self.cfg.items() if k != "hwnd"},
+                          f, ensure_ascii=False, indent=2)
+            self.log("配置已保存：%s" % CFG_PATH)
+            self.lbl_region.config(text=self.region_text())
+        except Exception as e:
+            self.log("保存配置失败：%s" % e)
+
+    # ---- 预览 / 日志 / 循环 ----
+    def log(self, m):
+        tag = "info"
+        if m.startswith("!!"):
+            tag = "err"
+        elif "点击" in m:
+            tag = "hit"
+        elif any(k in m for k in ("提示", "建议", "遮挡", "跳过", "未变化", "失败")):
+            tag = "warn"
+        elif any(k in m for k in ("引擎", "热键", "已保存", "已设置", "已锁定", "成功")):
+            tag = "ok"
+        self.txt.insert("end", time.strftime("%H:%M:%S  "), "time")
+        self.txt.insert("end", m + "\n", tag)
+        self.txt.see("end")
+        try:
+            if int(self.txt.index("end-1c").split(".")[0]) > 500:
+                self.txt.delete("1.0", "120.0")
+        except Exception:
+            pass
+
+    def _render_preview(self):
+        img = self._last_bgr
+        if img is None:
+            return
+        try:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            pw = max(200, self.canvas.winfo_width() - 8)
+            ph = max(120, self.canvas.winfo_height() - 8)
+            sc = min(pw / float(w), ph / float(h), 4.0)
+            pil = Image.fromarray(rgb).resize(
+                (max(1, int(w * sc)), max(1, int(h * sc))), Image.NEAREST)
+            self._tk = ImageTk.PhotoImage(pil)
+            self.canvas.config(image=self._tk)
+            self.lbl_prev.config(text="预览 %d×%d · 缩放 %.0f%%" % (w, h, sc * 100))
+        except Exception:
+            pass
+
+    def _poll(self):
+        try:
+            while True:
+                kind, payload = self.logq.get_nowait()
+                if kind == "log":
+                    self.log(payload)
+                elif kind == "stopped":
+                    self._start_btn(True)
+                    self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+        except queue.Empty:
+            pass
+        while True:
+            try:
+                key = self.hotq.get_nowait()
+            except queue.Empty:
+                break
+            if key == "f8":
+                self.toggle()
+            elif key == "f12":
+                self.stop()
+        img = None
+        while True:
+            try:
+                img = self.imgq.get_nowait()
+            except queue.Empty:
+                break
+        if img is not None:
+            self._last_bgr = img
+            self._render_preview()
+        if self.eng:
+            running = self.eng.is_alive()
+            s = ("暂停" if self.eng.paused else "运行") if running else "停止"
+            self.stat_vals["rounds"].config(text=str(self.eng.rounds))
+            self.stat_vals["clicks"].config(text=str(self.eng.clicks))
+            self.stat_vals["hits"].config(text=str(self.eng.hits))
+            self.stat_vals["state"].config(
+                text=s, fg=(OK if not self.eng.paused else WARN) if running else SUB)
+            if running:
+                self.pill.config(text=" 暂停 " if self.eng.paused else " 运行 ",
+                                 bg=WARN if self.eng.paused else ACCENT,
+                                 fg="#231A00" if self.eng.paused else "#0A1016")
+            else:
+                self.pill.config(text=" 停止 ", bg=BORDER, fg=TEXT)
+        self.after(120, self._poll)
+
+    def _close(self):
+        try:
+            if getattr(self, "_kb", None):
+                self._kb.unhook_all()
+        except Exception:
+            pass
+        self.stop()
+        self.save()
+        self.after(150, self.destroy)
+
+
+if __name__ == "__main__":
+    App().mainloop()
