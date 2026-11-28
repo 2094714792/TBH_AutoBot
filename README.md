@@ -33,13 +33,16 @@ Windows 10/11，Python 3.11。程序启动时会 `SetProcessDpiAwareness(2)`，1
 
 ## 从仓库还原可运行目录
 
-仓库里的 `bot_gui.py` 分成 3 片存放（`src/bot_gui.py.part1..3`）——上传走的是纯文本接口，单次有长度上限。还原：
+仓库里的 `bot_gui.py` 分成 9 片存放（`src/bot_gui.py.part01..09`）——上传走的是纯文本接口，单次长度有上限（约 9.3KB），所以拆片。还原：
 
 ```bash
-python tools/assemble_source.py        # 拼回 bot_gui.py，并打印 sha256 供核对
+python tools/assemble_source.py          # 只拼不写，打印片数与 sha256，并和现有 bot_gui.py 对比
+python tools/assemble_source.py --write  # 确要重写时再加 --write
 pip install -r requirements.txt
 python bot_gui.py
 ```
+
+当前 v1.4 分片拼回的 sha256 是 `6e45dc03150f01e84c408ab65c9c428f6586aca0387507009f2255e80caa3f73`（1638 行 / 69,601 字节），对不上就是分片有改动。改完源码用 `python tools/split_source.py --write` 重新切片，两边规则对称（片与片之间单个换行、片尾不留空行）。
 
 `templates.png`（识别必需的模板图集）不放在仓库里：
 
@@ -81,10 +84,11 @@ python tools/capture_templates.py         # 游戏界面改版 / 窗口尺寸变
 
 ```
 bot_gui.py            # 全部逻辑：窗口枚举 / 区域解析 / 卡片识别 / 引擎线程 / 面板巡检 / Tkinter 界面
-src/bot_gui.py.part*  # 上传分片，用 tools/assemble_source.py 拼回 bot_gui.py
+src/bot_gui.py.part01..09   # 上传分片（9 片），tools/assemble_source.py 拼回 bot_gui.py
 templates.png         # 模板图集（识别必需；不在仓库里，见上面“还原”一节）
 tpl_src/              # 图集里的 12 张单图，由 pack_templates.py 拆出/打包
-tools/assemble_source.py    # 拼回 bot_gui.py + 校验 sha256
+tools/assemble_source.py    # 拼回 bot_gui.py + 校验 sha256（默认不写盘）
+tools/split_source.py       # 与 assemble 对称：bot_gui.py → 9 片
 tools/pack_templates.py     # 图集 ↔ 单图 互转，打印 TPLS 坐标表
 tools/capture_templates.py  # 从运行中的游戏重拍模板（改版/换分辨率后）
 dev/lab.py            # 诊断：报窗口/可见区/各模板当前得分/六边形坐标，不动手
