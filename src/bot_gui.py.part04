@@ -1,0 +1,179 @@
+            return -1.0
+        hsv = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        s, v = hsv[:, :, 1].astype(int), hsv[:, :, 2].astype(int)
+        return float(((s > 55) & (v > 70)).mean())
+
+    def store(self):
+        """一轮完整巡检：开仓库 → 点几次「仓库<背包」→ 需要时合成"""
+        self.sc = ui_scale(self.cfg.get("hwnd"), self.sct)
+        img, btn = self._open_warehouse()
+        if img is None:
+            self.log("仓库面板始终没开出来，本轮放弃（不瞎点）")
+            return False
+        before = self._wh_frac(img, btn)
+        n = int(self.cfg.get("wh_click", 3))
+        for _ in range(n):
+            if not self._click(btn[0], btn[1]):
+                break
+        after = self._wh_frac(self._shot(), btn)
+        self.bag = after
+        self.log("存仓：点 %d 次「仓库<背包」(%d,%d)，仓库占用 %.3f -> %.3f%s" % (
+            n, btn[0], btn[1], before, after, "（已满）" if after > 0.28 else ""))
+        if self.cfg.get("cube"):
+            self._cube()
+        elif after > 0.28:
+            self.log("仓库快满了（%.2f），可以勾选「魔方合成」来腾位置" % after)
+        return True
+
+    # ---------------- 魔方 ----------------
+    CUBE_FILL = (206, -102)     # 「自动填充」相对「魔方」六边形
+    CUBE_EXEC = (340, -104)     # 「合成」相对「魔方」六边形
+
+    def _cube_btn(self, img, tpl, off, thr):
+        """魔方面板按钮：位置由「魔方」六边形 + 固定偏移推出来（不写死屏幕坐标）"""
+        row = self._row(img)
+        if not row:
+            return None
+        sc = self.sc
+        cx, cy = row["魔方"]
+        p = (int(cx + off[0] * sc), int(cy + off[1] * sc))
+        return self._match(tpl, img, self._box(p[0], p[1], 70 * sc, 50 * sc), thr)
+
+    def _cube(self):
+        times = int(self.cfg.get("cube_times", 3))
+        fp = self._cube_btn(self._shot(), "cube_fill", self.CUBE_FILL, 0.74)
+        if fp is None:
+            if self._open_hex("魔方") is None:
+                self.log("魔方六边形打开失败，跳过合成")
+                return
+            for _ in range(5):                     # 面板有动画，多等一会儿
+                time.sleep(0.55)
+                fp = self._cube_btn(self._shot(), "cube_fill", self.CUBE_FILL, 0.72)
+                if fp:
+                    break
+        if fp is None:
+            self.log("魔方面板没开出来，跳过合成")
+            return
+        for i in range(times):
+            img = self._shot()
+            fp = self._cube_btn(img, "cube_fill", self.CUBE_FILL, 0.72)
+            if fp is None:
+                self.log("第 %d/%d 次：找不到「自动填充」，停止" % (i + 1, times))
+                return
+            if not self._click(fp[1], fp[2]):
+                return
+            time.sleep(0.80)
+            img = self._shot()
+            frac = self._grid_frac(img, fp)
+            if 0 <= frac < 0.085:
+                self.log("第 %d/%d 次：自动填充后格子仍空（%.3f），没凑够 9 件，停止" % (
+                    i + 1, times, frac))
+                return
+            ex = self._cube_btn(img, "cube_exec_on", self.CUBE_EXEC, 0.90)
+            off = self._cube_btn(img, "cube_exec_off", self.CUBE_EXEC, 0.90)
+            if ex is None and off is not None:
+                self.log("第 %d/%d 次：合成按钮是灰的——仓库里没有 9 件同等级装备，跳过" % (
+                    i + 1, times))
+                return
+            if ex is None:
+                self.log("第 %d/%d 次：找不到合成按钮，停止" % (i + 1, times))
+                return
+            if not self._click(ex[1], ex[2]):
+                return
+            time.sleep(1.20)
+            after = self._grid_frac(self._shot(), fp)
+            if after >= 0 and after < frac - 0.03:
+                self.log("魔方第 %d/%d 次：填充 + 合成成功（格子亮件 %.3f -> %.3f）" % (
+                    i + 1, times, frac, after))
+            else:
+                self.log("魔方第 %d/%d 次：点了合成格子没变化（%.3f -> %.3f），停止" % (
+                    i + 1, times, frac, after))
+                return
+
+    def _grid_frac(self, img, fill_pos):
+        """3×3 格子的「亮件」占比：9 件≈0.107，1 件≈0.036，空 0.000"""
+        sc = self.sc
+        x, y = int(fill_pos[1] + 2 * sc), int(fill_pos[2] - 152 * sc)
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(img.shape[1], x0 + int(86 * sc)), min(img.shape[0], y0 + int(74 * sc))
+        if x1 - x0 < 40 * sc or y1 - y0 < 40 * sc:
+            return -1.0
+        hsv = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        return float((hsv[:, :, 2].astype(int) > 140).mean())
+
+    # ---------------- 巡检 ----------------
+    def esc(self, n=2):
+        """收面板；只在游戏仍在前台时发 Esc，免得把 Esc 送到别的软件里"""
+        hwnd = self.cfg.get("hwnd")
+        try:
+            if hwnd and win32gui.IsWindow(hwnd) and win32gui.GetForegroundWindow() != hwnd:
+                return
+        except Exception:
+            return
+        for _ in range(n):
+            pg.press("escape")
+            time.sleep(0.2)
+
+    def run(self):
+        """到点巡检；游戏不在前台就先抢前台，做完把前台还回去"""
+        tries = 0
+        while not self._stop.is_set():
+            time.sleep(0.5)
+            try:
+                if not self.cfg.get("bag"):
+                    tries = 0
+                    continue
+                if time.time() - self.last_run < float(self.cfg.get("bag_interval", 600)):
+                    continue
+                hwnd = self.cfg.get("hwnd")
+                if not hwnd or not win32gui.IsWindow(hwnd):
+                    continue
+                if win32gui.GetForegroundWindow() != hwnd:
+                    if not int(self.cfg.get("fg_steal", 1)):
+                        self.log("游戏不在前台，本轮跳过（可勾选「巡检前自动切前台」）")
+                        self.last_run = time.time()
+                        tries = 0
+                        continue
+                    if not force_foreground(hwnd):
+                        tries += 1
+                        if tries == 1:
+                            self.log("游戏窗口抢不到前台，每 5 秒重试（最多 12 次）")
+                        if tries >= 12:
+                            self.log("12 次都没抢到前台，本轮放弃")
+                            self.last_run = time.time()
+                            tries = 0
+                        else:
+                            time.sleep(5.0)
+                        continue
+                tries = 0
+                self.last_run = time.time()
+                panel_pass(self)
+            except Exception as e:
+                self.log("巡检异常：%s" % e)
+                with contextlib.suppress(Exception):
+                    self.esc(1)
+
+
+def panel_pass(bot):
+    """抢前台 → 暂停引擎 → 跑一轮巡检 → Esc 收面板 → 前台还回去
+
+    定时巡检和「立即巡检一次」共用这一条路径。返回是否成功开跑。"""
+    cfg, eng = bot.cfg, bot.eng
+    hwnd = cfg.get("hwnd")
+    try:
+        prev = win32gui.GetForegroundWindow()
+    except Exception:
+        prev = None
+    if not force_foreground(hwnd):
+        return False
+    paused = None
+    if eng is not None and eng.is_alive():
+        paused = eng.paused
+        eng.paused = True           # 巡检期间暂停点宝箱，避免两边抢鼠标
+    try:
+        bot.store()
+    finally:
+        with contextlib.suppress(Exception):
+            bot.esc(2)
+        if eng is not None and paused is not None:
+            eng.paused = bool(paused)
