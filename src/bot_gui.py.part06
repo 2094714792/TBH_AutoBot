@@ -1,0 +1,169 @@
+                      activebackground="#2C2F35", activeforeground=TEXT,
+                      relief="flat", bd=0, font=(FONT, 9),
+                      padx=14, pady=7, cursor="hand2",
+                      highlightthickness=1, highlightbackground=BORDER,
+                      highlightcolor=ACCENT)
+    b.bind("<Enter>", lambda e: b.config(bg="#2C2F35" if kind != "primary" else ACCENT_H))
+    b.bind("<Leave>", lambda e: b.config(bg=PANEL2 if kind != "primary" else ACCENT))
+    return b
+
+
+def _chk(parent, text, var, cmd=None, font=9):
+    return tk.Checkbutton(parent, text=text, variable=var, command=cmd,
+                          bg=PANEL, fg=TEXT, activebackground=PANEL, activeforeground=TEXT,
+                          selectcolor=PANEL2, relief="flat", bd=0,
+                          font=(FONT, font), cursor="hand2")
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("TBH 自动挂机助手 v1.4")
+        self.geometry("1180x980")
+        self.minsize(1080, 860)
+        self.configure(bg=BG)
+        self.cfg = dict(DEFAULT)
+        if os.path.exists(CFG_PATH):
+            try:
+                with open(CFG_PATH, encoding="utf-8") as f:
+                    self.cfg.update(json.load(f))
+            except Exception:
+                pass
+        self.logq, self.imgq = queue.Queue(), queue.Queue(maxsize=3)
+        g = find_game_hwnd()          # 启动即自动识别游戏窗口，区域跟随它
+        if g:
+            self.cfg["hwnd"] = g[0]
+            self.cfg["hwnd_title"] = g[2]
+            self.cfg["follow"] = 1
+            self.cfg["region"] = None
+        self.hotq = queue.Queue()
+        self.eng = None
+        self.panelbot = None
+        self.windows = []
+        self._sct = new_sct()
+        self._tk = None
+        self._last_bgr = None
+        self._style()
+        self._build()
+        self.refresh()
+        self.after(60, self._apply_size)
+        self.after(120, self._poll)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        if "--start" in sys.argv:
+            self.after(600, self.start)
+        if load_tpl("card_tpl") is None:
+            self.log("!! 缺少 templates.png 或切片越界，卡片识别会失效")
+        try:
+            import keyboard
+            self._kb = keyboard
+            keyboard.hook(self._on_key)
+            self.log("热键已启用：F8 暂停/继续，F12 停止")
+        except Exception as e:
+            self._kb = None
+            self.log("热键启用失败（不影响按钮操作）: %s" % e)
+
+    def _apply_size(self):
+        """按实际内容定窗口大小（超出屏幕就往屏幕内收，最小 1180x980）"""
+        self.update_idletasks()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = min(max(1180, self.winfo_reqwidth()), sw - 60)
+        h = min(max(980, self.winfo_reqheight() + 8), sh - 70)
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 6)))
+
+    def _on_key(self, e):
+        try:
+            if e.event_type == "down" and e.name in ("f8", "f12"):
+                self.hotq.put(e.name)
+        except Exception:
+            pass
+
+    # ---- 视觉 ----
+    def _style(self):
+        st = ttk.Style(self)
+        with contextlib.suppress(Exception):
+            st.theme_use("clam")
+        st.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
+                     foreground=TEXT, arrowcolor=SUB, bordercolor=BORDER,
+                     lightcolor=PANEL2, darkcolor=PANEL2, padding=5)
+        st.map("TCombobox",
+               fieldbackground=[("readonly", PANEL2), ("active", PANEL2)],
+               foreground=[("readonly", TEXT)],
+               selectbackground=[("readonly", PANEL2)],
+               selectforeground=[("readonly", TEXT)],
+               bordercolor=[("focus", ACCENT)])
+        for k, v in (("background", PANEL2), ("foreground", TEXT),
+                     ("selectBackground", ACCENT), ("selectForeground", "#0A1016"),
+                     ("font", (FONT, 9))):
+            self.option_add("*TCombobox*Listbox." + k, v)
+
+    def _card(self, parent, title, sub=""):
+        wrap = tk.Frame(parent, bg=BORDER)          # 1px 边框
+        inner = tk.Frame(wrap, bg=PANEL)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        head = tk.Frame(inner, bg=PANEL)
+        head.pack(fill="x", padx=12, pady=(8, 2))
+        tk.Label(head, text=title, bg=PANEL, fg=TEXT, font=(FONT, 10, "bold")).pack(side="left")
+        if sub:
+            tk.Label(head, text=sub, bg=PANEL, fg=SUB, font=(FONT, 8)).pack(side="left", padx=(8, 0))
+        body = tk.Frame(inner, bg=PANEL)
+        body.pack(fill="both", expand=True, padx=12, pady=(2, 8))
+        return wrap, body
+
+    def _entry(self, parent, var, width=9):
+        return tk.Entry(parent, textvariable=var, width=width, bg=PANEL2, fg=TEXT,
+                        insertbackground=TEXT, relief="flat", bd=0,
+                        font=(FONT, 9), justify="center",
+                        highlightthickness=1, highlightbackground=BORDER,
+                        highlightcolor=ACCENT)
+
+    # ---- 布局 ----
+    def _build(self):
+        self._build_head()
+        self._build_region()
+        self._build_params()
+        self._build_control()
+        self._build_panel()
+        self._build_body()
+
+    def _build_head(self):
+        head = tk.Frame(self, bg=BG)
+        head.pack(fill="x", padx=18, pady=(10, 4))
+        tk.Label(head, text="TBH 自动挂机助手", bg=BG, fg=TEXT,
+                 font=(FONT, 17, "bold")).pack(side="left")
+        tk.Label(head, text="宝箱卡片自动识别点击 v1.4", bg=BG, fg=SUB,
+                 font=(FONT, 9)).pack(side="left", padx=(10, 0), pady=(7, 0))
+        self.pill = tk.Label(head, text=" 停止 ", bg=BORDER, fg=TEXT,
+                             font=(FONT, 9, "bold"), padx=10, pady=3)
+        self.pill.pack(side="right")
+
+    def _build_region(self):
+        wrap, b = self._card(self, "① 目标窗口与检测区域", "截图范围越小识别越稳")
+        wrap.pack(fill="x", padx=18, pady=(0, 6))
+        self.cb = ttk.Combobox(b, state="readonly")
+        self.cb.pack(fill="x", ipady=2)
+        row = tk.Frame(b, bg=PANEL)
+        row.pack(fill="x", pady=(6, 0))
+        _btn(row, "自动识别", kind="primary", cmd=self.auto_detect).pack(side="left")
+        for txt, cmd, pad in (("框选区域", self.select_region, 6), ("清除区域", self.clear_region, 6),
+                              ("测试识别", self.test, 6)):
+            _btn(row, txt, cmd=cmd).pack(side="left", padx=(pad, 0))
+        self.follow = tk.BooleanVar(value=bool(self.cfg.get("follow", 1)))
+        _chk(row, "跟随窗口右下角", self.follow, self._toggle_follow, font=8).pack(
+            side="left", padx=(12, 0))
+        self.lbl_region = tk.Label(row, text=self.region_text(), bg=PANEL, fg=SUB,
+                                   font=(FONT, 8), anchor="w")
+        self.lbl_region.pack(side="left", padx=(12, 0))
+
+    def _build_params(self):
+        wrap, b2 = self._card(self, "② 识别与点击参数")
+        wrap.pack(fill="x", padx=18, pady=(0, 8))
+        self.vars = {}
+        items = [("interval", "轮询间隔(s)", "0.3"), ("card_cd", "点击冷却(s)", "0.8"),
+                 ("white_v", "白度阈值 V", "216"), ("white_s", "饱和度上限 S", "46"),
+                 ("min_area", "卡片最小面积", "600"), ("max_area", "卡片最大面积", "9000"),
+                 ("solid_min", "形状实心度", "0.92"), ("retry_cd", "无变化跳过(s)", "25")]
+        for i, (k, label, d) in enumerate(items):
+            r, c = divmod(i, 4)
+            b2.columnconfigure(c, weight=1)
+            f = tk.Frame(b2, bg=PANEL)
+            f.grid(row=r * 2, column=c, sticky="w", padx=(0, 16), pady=(6, 0))
