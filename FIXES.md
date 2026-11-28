@@ -39,3 +39,16 @@
 ## 未完成 / 待实测
 - 魔方两个按钮的偏移是按参考图换算的，尚未逐帧实测。
 - 背包“占用率”目前只是彩色像素占比的参考值，不做满/空判定。
+
+## v1.4 工程清理（详细过程见 FIXES_v14.md）
+
+- **目录瘦身**：`build/`（56 文件 / 337MB）、旧 exe、旧 spec、v1.2 的 `src/chunks/`、5 个冗余脚本、`code.bat`、`__pycache__`、`dev/` 里 272 个调试文件全部删除（删前整包备份 zip）；`dev/` 只剩 lab / selftest / shot_app。
+- **模板合并**：12 张散图 → 一张 `templates.png`（957×56 / 41KB），代码只登记 `TPLS` 切片坐标；`np.array_equal` 逐像素验证，拆开再打包仍一致。
+- **代码重写**：1679 → 1638 行，删死代码（`find_banners` / `_panel_hit` / `cycle` / `ready_tpl` / 无用常量）、合并三级识别为 `detect_cards()`、巡检流程为 `panel_pass()`、重复控件写法为 `_chk()` / `_num()`，7 处 `except: pass` 换 `contextlib.suppress`；pyflakes 0 警告。
+- **5 遍检查抓到的两个真 bug**：① `find_cards_tpl()` 里 `s = sc * k` 算完仍用 `sc` 去 resize，7 个尺度全是同一个尺寸、白跑 7 次匹配；② `wh_store` / `wh_back` 模板过时（全屏最高 0.34），导致“仓库面板始终没开出来”，已用 `tools/capture_templates.py` 重拍并使存仓实测通过。
+- **新增点击遮挡防护**：`PanelBot._click()` 先 `point_blocked()` 判断归属，被浏览器 / Steam / WeGame / 任务栏压住就不点，日志写出被谁挡住，后续步骤提前收手。
+- **新增 UI 缩放自适应**：`ui_scale() = 可见宽度 / 970`（限幅 0.65~1.8），模板、六边形间距、按钮偏移、格子区、面积阈值全部按倍数缩放；实测 1212 宽时金盾模板 0.47 → 0.94。
+- **build.bat 修好**：`py -3` 优先、依赖自检、CRLF、括号块不用 `%VAR%` 延迟展开，实测可跑并产出 `dist/TBH_AutoBot.exe`。
+- **仓库同步**：源码分 9 片（`src/bot_gui.py.part01..09`）以绕开单次上传长度上限，`tools/split_source.py` ↔ `tools/assemble_source.py` 规则对称，已用 sha256 双向校验。
+
+遗留：端到端“存仓 + 魔方”复测需要游戏独占前台，详见 FIXES_v14.md。
