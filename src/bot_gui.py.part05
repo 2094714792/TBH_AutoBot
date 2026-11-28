@@ -1,0 +1,200 @@
+        try:
+            if prev and prev != hwnd and win32gui.IsWindow(prev):
+                win32gui.SetForegroundWindow(prev)
+        except Exception:
+            pass
+    return True
+
+
+# ---------------- 引擎 ----------------
+class Engine(threading.Thread):
+    def __init__(self, cfg, logq, imgq):
+        super().__init__(daemon=True)
+        self.cfg, self.logq, self.imgq = cfg, logq, imgq
+        self._stop_evt = threading.Event()
+        self.sct = None
+        self.paused = False
+        self.clicks = 0
+        self.rounds = 0
+        self.hits = 0
+        self.last_fire = 0.0
+        self.retry = {}
+        self.skip_until = {}
+        self.err_streak = 0
+        self.last_err = ""
+
+    def stop(self):
+        self._stop_evt.set()
+
+    def log(self, m):
+        self.logq.put(("log", m))
+
+    def _foreground_ok(self, hwnd):
+        """游戏是 WS_EX_TRANSPARENT 的置顶窗口：不在前台时点击会穿透到下面的桌面/
+           别的软件——这就是“累计几百次点击、画面纹丝不动”的根源。
+           只在游戏位于前台时才点击；若前台是本程序自己的窗口，顺手把它切回前台。"""
+        try:
+            fg = win32gui.GetForegroundWindow()
+        except Exception:
+            return True
+        if not fg or fg == hwnd:
+            return True
+        if _win_pid(fg) == os.getpid():          # 前台是本程序（刚点了“开始”），可以直接切
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+                time.sleep(0.25)
+                if win32gui.GetForegroundWindow() == hwnd:
+                    self.log("已把游戏窗口切到前台")
+                    return True
+            except Exception:
+                pass
+        if time.time() - getattr(self, "_fg_log", 0) > 8:
+            self._fg_log = time.time()
+            try:
+                info = "%s|%s" % (win32gui.GetClassName(fg), win32gui.GetWindowText(fg)[:24] or "-")
+            except Exception:
+                info = "?"
+            self.log("提示：游戏窗口不在前台（当前前台：%s），已暂停点击。请点一下游戏画面让它到最前" % info)
+        return False
+
+    def _patch(self, img, box, pad=4):
+        x, y, w, h = box
+        H, W = img.shape[:2]
+        return img[max(0, y - pad):min(H, y + h + pad),
+                   max(0, x - pad):min(W, x + w + pad)].astype(np.int16)
+
+    def step(self):
+        cfg = self.cfg
+        region = resolve_region(self.sct, cfg)
+        img = grab(self.sct, region)
+        cards = detect_cards(img, cfg, ui_scale(cfg.get("hwnd"), self.sct))
+        self.rounds += 1
+        if cfg["debug"] and self.imgq.qsize() < 2:
+            try:
+                self.imgq.put_nowait(draw_debug(img, cards, region, "r%d" % self.rounds))
+            except queue.Full:
+                pass
+        now = time.time()
+        if now - self.last_fire < cfg["card_cd"]:
+            return
+        for c in cards:
+            if cfg["blue_only"] and not c["blue"]:
+                continue
+            key = (round(c["center"][0] / 24.0), round(c["center"][1] / 24.0))
+            if self.skip_until.get(key, 0) > now:
+                continue
+            self.fire(region, img, c, key)
+            return
+
+    def fire(self, region, img, card, key):
+        cfg = self.cfg
+        x, y, w, h = card["box"]
+        cx, cy = card["center"]
+        sx = region[0] + cx + random.randint(-2, 2)
+        sy = region[1] + cy + random.randint(-2, 2)
+        before = self._patch(img, card["box"])
+        hwnd = cfg.get("hwnd")
+        if hwnd:
+            blocked, why = point_blocked(sx, sy, hwnd)
+            if blocked:
+                if self.skip_until.get(key, 0) <= time.time():
+                    self.log("目标位置被 %s 遮挡，暂不点击" % why)
+                self.skip_until[key] = time.time() + 3.0
+                return
+        pg.moveTo(sx, sy, duration=random.uniform(0.06, 0.14))
+        pg.click()
+        self.last_fire = time.time()
+        self.clicks += 1
+        self.log("点击[%s] 屏幕(%d,%d) 累计%d" % ("蓝框" if card["blue"] else "普通", sx, sy, self.clicks))
+        time.sleep(0.35)
+        pa = self._patch(grab(self.sct, region), card["box"])
+        if pa.shape != before.shape or pa.size == 0:
+            self.retry.pop(key, None)
+            return
+        diff = float(np.abs(pa - before).mean())
+        if diff >= cfg["card_diff"]:
+            self.hits += 1
+            self.retry.pop(key, None)
+            return
+        n = self.retry.get(key, 0) + 1
+        self.retry[key] = n
+        self.log("  画面未变化 diff=%.1f（%d/%d）" % (diff, n, cfg["max_retry"]))
+        if n >= cfg["max_retry"]:
+            self.retry.pop(key, None)
+            self.skip_until[key] = time.time() + cfg["retry_cd"]
+            self.log("!! 同一位置连续 %d 次无变化，跳过该位置 %.0fs" % (n, cfg["retry_cd"]))
+
+    def run(self):
+        cfg = self.cfg
+        self.log("引擎启动")
+        self.sct = new_sct()
+        try:
+            while not self._stop_evt.is_set():
+                if self.paused:
+                    time.sleep(0.2)
+                    continue
+                hwnd = cfg.get("hwnd")
+                if hwnd:
+                    if not win32gui.IsWindow(hwnd):
+                        self.log("!! 目标窗口已关闭，引擎停止")
+                        break
+                    if not self._foreground_ok(hwnd):
+                        time.sleep(0.8)
+                        continue
+                    rect = win32gui.GetWindowRect(hwnd)
+                    if win32gui.IsIconic(hwnd) or (rect[1] < -3000 and rect[3] < -3000):
+                        if time.time() - getattr(self, "_wait_log", 0) > 10:
+                            self.log("窗口已最小化，等待中…")
+                            self._wait_log = time.time()
+                        time.sleep(1.0)
+                        continue
+                try:
+                    self.step()
+                    self.err_streak = 0
+                except Exception as e:
+                    self.err_streak += 1
+                    msg = "%s: %s" % (type(e).__name__, e)
+                    if msg != self.last_err or self.err_streak % 10 == 1:
+                        self.log("!! 第 %d 次异常 %s" % (self.err_streak, msg))
+                    self.last_err = msg
+                    if self.err_streak >= 20:
+                        self.log("!! 连续异常 20 次，停止引擎")
+                        break
+                    time.sleep(0.8)
+                    with contextlib.suppress(Exception):
+                        self.sct = new_sct()
+                    continue
+                time.sleep(max(0.15, cfg["interval"] + random.uniform(-0.15, 0.25)))
+        except Exception:
+            self.log("异常:\n" + traceback.format_exc())
+        finally:
+            self.log("引擎已停止")
+            self.logq.put(("stopped", None))
+
+
+# ---------------- GUI ----------------
+# 视觉规范（Fluent 风格深色）
+BG = "#1A1B1E"
+PANEL = "#232529"
+PANEL2 = "#1C1E22"
+BORDER = "#33363C"
+TEXT = "#E7E9EC"
+SUB = "#9AA0A8"
+ACCENT = "#4CC2FF"
+ACCENT_H = "#79D4FF"
+OK = "#6FD98B"
+WARN = "#F2C24B"
+ERR = "#FF6B6B"
+FONT = "Microsoft YaHei UI"
+MONO = "Consolas"
+
+
+def _btn(parent, text, kind="ghost", cmd=None):
+    """按钮：primary=实心主题色，ghost=描边次要"""
+    if kind == "primary":
+        b = tk.Button(parent, text=text, command=cmd, bg=ACCENT, fg="#0A1016",
+                      activebackground=ACCENT_H, activeforeground="#0A1016",
+                      relief="flat", bd=0, font=(FONT, 10, "bold"),
+                      padx=20, pady=8, cursor="hand2")
+    else:
+        b = tk.Button(parent, text=text, command=cmd, bg=PANEL2, fg=TEXT,
